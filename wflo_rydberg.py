@@ -251,15 +251,18 @@ print("QUBO minima coincide with the enumerated optimum sets on all rungs")
 # Two numpy implementations of Metropolis annealing, 36 independent runs each from random initial states, geometric
 # inverse-temperature schedules:
 #
-# - **SA-QUBO** (the paper's protocol, which used D-Wave's `neal` sampler): single-bit flips on the full QUBO,
-#   1,000 sweeps. The schedule runs from $\beta_0 = \ln 2 / (\lambda_1 + 576)$ to
-#   $\beta_1 = \ln 100 / \max(\min_{W_{ij}>0} W_{ij}, 1)$. (neal's default takes the cold end from the smallest QUBO
-#   coefficient, here a count-penalty coupling $2\lambda_1$, which leaves the final temperature too hot to hold the
-#   turbine count.) Every move between two 4-turbine layouts must pass through 3 or 5 turbines, so the count penalty
-#   creates barriers of hundreds of kW. On the long-wake rungs (R1, R3) the gap to the second-best layout is only
-#   22 kW and 4 kW, and bit-flip SA ends in local minima.
-# - **SA-swap** (a stronger classical reference): annealing restricted to exactly $m$ turbines, where each move
-#   relocates one turbine to an empty site; 20,000 steps.
+# - **SA-swap** (the classical reference used in the comparison table): annealing restricted to exactly $m$
+#   turbines, where each move relocates one turbine to an empty site; 20,000 steps.
+# - **SA-QUBO** (a note only): bit-flip SA on the full QUBO, 1,000 sweeps, $\lambda_1 = 1.05 \times 576$ chosen by
+#   scan (the paper does not state $\lambda_1$). The schedule runs from $\beta_0 = \ln 2 / (\lambda_1 + 576)$ to
+#   $\beta_1 = \ln 100 / \max(\min_{W_{ij}>0} W_{ij}, 1)$. Every move between two 4-turbine layouts must pass through
+#   3 or 5 turbines, so the count penalty creates barriers of hundreds of kW. On the long-wake rungs (R1, R3) the gap
+#   to the second-best layout is only 22 kW and 4 kW, and bit-flip SA ends in local minima.
+#
+# The paper's SA (pyqubo + D-Wave `neal`, settings and $\lambda_1$ not stated) is **not** reproduced here. Read off
+# its Fig. 9, its 36 runs on R0 have a median near 2080 kW (≈90% of optimum) and a minimum near 1730 kW; our SA-QUBO
+# reaches 99.8% on average. We therefore make no claim that SA-QUBO reproduces their SA, and quote their numbers
+# separately.
 
 # %%
 def sa_qubo(h, J, W, lam=LAMBDA1, n_runs=36, n_sweeps=1000, rng=RNG):
@@ -323,8 +326,160 @@ assert all(r["frac_m_turbines"] == 1 for r in sa_results.values())
 
 # %% [markdown]
 # ## 3. Rydberg encodings
-# *(Phase 2–3: Encoding A — native blockade on the grid; Encoding B — QUBO embedded into atom positions.)*
+# ### 3.1 Emulation setup
+# Programs are written in QoolQit's dimensionless units (for `AnalogDevice`: distance unit 5 µm, energy unit
+# $C_6/(5\,\mu m)^6$, so $U(r) = 1/r^6$) and compiled to `AnalogDevice`. We emulate with emu-sv (exact state vector,
+# complex128, GPU if available) and read the **exact final state**, so the primary metrics carry no sampling noise.
+# Bitstring convention: character $k$ = qubit $k$ = site $k$; as an integer index, qubit 0 is the most significant bit.
+
+# %%
+import logging
+
+from emu_sv import SVConfig
+from qoolqit import AnalogDevice, Drive, PiecewiseLinearWaveform, QuantumProgram, Register
+from qoolqit.execution import BackendType, LocalEmulator, StateResult
+
+DEVICE = AnalogDevice()
+T_MAX = DEVICE.specs["max_duration"]
+
+
+def adiabatic_drive(delta_final, delta_0, omega, T=T_MAX):
+    """Standard MIS schedule: amplitude up / hold / down; detuning held at delta_0, swept to delta_final, held."""
+    amp = PiecewiseLinearWaveform([0.1 * T, 0.8 * T, 0.1 * T], [0.0, omega, omega, 0.0])
+    det = PiecewiseLinearWaveform([0.1 * T, 0.8 * T, 0.1 * T], [delta_0, delta_0, delta_final, delta_final])
+    return Drive(amplitude=amp, detuning=det)
+
+
+def final_probs(register, drive, gpu=GPU):
+    """Compile, emulate with emu-sv and return (exact bitstring probabilities, wall-clock seconds)."""
+    prog = QuantumProgram(register, drive)
+    prog.compile_to(DEVICE)
+    cfg = SVConfig(gpu=gpu, observables=(StateResult(evaluation_times=[1.0]),), log_level=logging.WARNING)
+    emu = LocalEmulator(backend_type=BackendType.SVBackend, emulation_config=cfg, num_shots=1)
+    t0 = time.perf_counter()
+    res = emu.run(prog).results()
+    wall = time.perf_counter() - t0
+    res = res[0] if isinstance(res, (list, tuple)) else res
+    probs = (res.final_state.data.abs() ** 2).double().cpu().numpy()
+    return probs / probs.sum(), wall
+
+
+# %% [markdown]
+# ### 3.2 Bitstring-to-site mapping test
+# Four atoms: three in a mutually blockaded triangle (spacing 1) and one isolated far away. After an adiabatic
+# sweep the isolated atom is excited and exactly one triangle atom is. Placing the isolated atom first and then
+# last checks that bit $k$ of the returned index really is qubit $k$.
+
+# %%
+TRIANGLE = [(0.0, 0.0), (1.0, 0.0), (0.5, np.sqrt(3) / 2)]
+for iso in (0, 3):
+    others = [q for q in range(4) if q != iso]
+    pos = [None] * 4
+    pos[iso] = (6.0, 0.0)
+    for q, c in zip(others, TRIANGLE):
+        pos[q] = c
+    pr, _ = final_probs(Register.from_coordinates(pos), adiabatic_drive(0.08, -0.10, 1 / 1.7**6), gpu=False)
+    B4 = bit_matrix(4)
+    p_iso, p_one = pr[B4[:, iso] == 1].sum(), pr[B4[:, others].sum(1) == 1].sum()
+    print(f"isolated qubit {iso}: P(isolated excited) = {p_iso:.3f}, P(exactly one triangle atom) = {p_one:.3f}")
+    assert p_iso > 0.9 and p_one > 0.9
+print("mapping test passes: bit k of the state index is qubit k")
+
+# %% [markdown]
+# ### 3.3 Encoding A (native blockade)
+# Atoms sit on the 4×4 grid at spacing $a = 1$ (the device minimum), site $k$ at $(x, y) = (k \% 4, k // 4)$.
+# With $\Omega = 1.7^{-6}$ the blockade radius $R_b = \Omega^{-1/6} = 1.7a$ lies between $\sqrt2 a$ and $2a$, so the
+# blockade forbids exactly the king-graph neighbours: the wake structure of R0. All sites have equal power, so one
+# global detuning sweep suffices.
 #
+# **Final detuning.** At the end of the sweep, adding an excitation gains $\Delta_f$ and costs the van der Waals
+# tails to atoms already excited: $U(\sqrt2 a) = 0.125$ forbids diagonal neighbours, but a new atom typically sits at
+# $2a$ from 2–4 excited atoms, costing $\approx 0.03$–$0.06$. The useful window is therefore $\approx 0.06 < \Delta_f <
+# 0.125$. We scan $\Delta_f$ on R0 only, choose the value maximising the exact probability of an optimal layout, and
+# freeze the schedule for every rung (no per-rung tuning). $T$ = device maximum.
+
+# %%
+L_SIDE = L_GRID
+OMEGA_A, DELTA_0_A = 1 / 1.7**6, -0.10
+R_B = OMEGA_A ** (-1 / 6)
+assert np.sqrt(2) < R_B < 2
+REG_A = Register.from_coordinates([(float(k % L_SIDE), float(k // L_SIDE)) for k in range(L_SIDE**2)])
+assert np.isclose(REG_A.min_distance(), 1.0) and REG_A.min_distance() >= DEVICE.specs["min_distance"]
+
+
+def exact_metrics(probs, d):
+    """Sampling-free metrics of a final state for one rung."""
+    p_w = np.bincount(WEIGHT, weights=probs, minlength=L_GRID**2 + 1)
+    m4 = WEIGHT == M_TURB
+    best4 = np.flatnonzero(m4)[np.argmax(probs[m4])]
+    return dict(
+        P3=float(p_w[3]), P4=float(p_w[4]), P5=float(p_w[5:].sum()),
+        P_opt=float(probs[d["opt_idx"]].sum()),
+        P_opt_given_4=float(probs[d["opt_idx"]].sum() / p_w[4]),
+        exp_pct_given_4=float(100 * (probs[m4] * d["power_all"][m4]).sum() / p_w[4] / d["optimum"]),
+        mode4_pct=float(100 * d["power_all"][best4] / d["optimum"]),   # paper's rule applied to the exact distribution
+    )
+
+
+DELTA_SCAN = [0.06, 0.07, 0.08, 0.09, 0.10, 0.11]
+scan = {}
+for df in DELTA_SCAN:
+    pr, wall = final_probs(REG_A, adiabatic_drive(df, DELTA_0_A, OMEGA_A))
+    scan[df] = dict(**exact_metrics(pr, INST["R0"]), wall_s=wall, probs=pr)
+print(" Delta_f    P(3)    P(4)    P(5)   P(opt)  P(opt|4)  E[%opt|4]   wall")
+for df, m in scan.items():
+    print(f"  {df:.2f}   {m['P3']:.4f}  {m['P4']:.4f}  {m['P5']:.4f}  {m['P_opt']:.4f}   {m['P_opt_given_4']:.4f}"
+          f"    {m['exp_pct_given_4']:6.2f}  {m['wall_s']:5.1f} s")
+
+# %% [markdown]
+# **Frozen schedule.** $\Delta_f = 0.10$ maximises the exact P(optimal layout) on R0 and is used unchanged on every
+# rung: $\Omega = 1.7^{-6}$, $\Delta: -0.10 \to 0.10$, $T = T_{\max}$, 10% / 80% / 10% ramp-hold-ramp.
+
+# %%
+DELTA_F_A = 0.10
+assert DELTA_F_A == max(scan, key=lambda df: scan[df]["P_opt"])
+PROBS_A = scan[DELTA_F_A]["probs"]          # Encoding A's final state is the same on every rung (same register, same drive)
+
+# %% [markdown]
+# ### 3.4 Selection-rule comparison (36 × 500 resampling)
+# The paper selects, per run, the most probable bitstring with exactly $m$ turbines. To reproduce that rule we draw
+# 36 independent sets of 500 shots from the exact final state and, in each, take the most frequent 4-turbine
+# bitstring (ties broken at random). **The spread across these 36 runs is pure shot noise of one fixed quantum state;
+# it is not comparable to the run-to-run spread of the paper's VQE, which comes from 36 separate optimisations.**
+
+# %%
+def resample_selection(probs, d, n_runs=36, shots=500, rng=RNG):
+    m4 = WEIGHT == M_TURB
+    pct, sel_opt, p_opt_shot, p_valid = [], [], [], []
+    for _ in range(n_runs):
+        counts = np.bincount(rng.choice(len(probs), size=shots, p=probs), minlength=len(probs))
+        c4 = np.where(m4, counts, 0)
+        p_opt_shot.append(counts[d["opt_idx"]].sum() / shots)
+        p_valid.append(c4.sum() / shots)
+        if c4.max() == 0:
+            pct.append(np.nan); sel_opt.append(False); continue
+        sel = rng.choice(np.flatnonzero(c4 == c4.max()))
+        pct.append(100 * d["power_all"][sel] / d["optimum"])
+        sel_opt.append(sel in set(d["opt_idx"]))
+    pct = np.array(pct)
+    return dict(mean_pct=float(np.nanmean(pct)), median_pct=float(np.nanmedian(pct)), min_pct=float(np.nanmin(pct)),
+                frac_selected_optimal=float(np.mean(sel_opt)), mean_P_opt_shot=float(np.mean(p_opt_shot)),
+                mean_valid_rate=float(np.mean(p_valid)), n_no_valid=int(np.isnan(pct).sum()))
+
+
+results_A = {}
+for name, d in INST.items():
+    results_A[name] = dict(exact=exact_metrics(PROBS_A, d), resampled=resample_selection(PROBS_A, d))
+    e, r = results_A[name]["exact"], results_A[name]["resampled"]
+    print(f"{name} Encoding A | exact: P(opt) {e['P_opt']:.4f}, P(opt|4) {e['P_opt_given_4']:.4f}, "
+          f"E[% opt | 4] {e['exp_pct_given_4']:6.2f}, mode-of-4 {e['mode4_pct']:6.2f}% "
+          f"| 36x500: mean {r['mean_pct']:6.2f}% (min {r['min_pct']:6.2f}%), selected optimal "
+          f"{round(r['frac_selected_optimal'] * 36):2d}/36, P(opt shot) {r['mean_P_opt_shot']:.3f}")
+
+# Phase 2 exit (Tier 1): on R0 the most probable 4-turbine layout is optimal, and every resampled run selects an optimal layout.
+assert results_A["R0"]["exact"]["mode4_pct"] == 100.0
+assert results_A["R0"]["resampled"]["frac_selected_optimal"] == 1.0
+print("Tier 1: R0 solved natively (emulator)")
 # ## 4. Results
 # *(Phase 4: comparison table and % of optimum vs rung.)*
 #
@@ -346,9 +501,11 @@ assert all(r["frac_m_turbines"] == 1 for r in sa_results.values())
 #    backend (`Float did not match Double` in the norm check), so the GPU runs in FP64 (slow on Ada-class cards).
 # 4. **Backend cross-check (R0, 16 atoms, 500 shots).** QuTiP and emu-sv agree on the exact probability of the 79
 #    optimal layouts to 4e-5. Wall clock: QuTiP 60 s (CPU, 16 threads), emu-sv 33 s (CPU), 8.8 s (GPU).
-# 5. **Blockade leak.** A first schedule with final detuning 0.104 (close to $U(\sqrt2 a) = 0.125$) put 26% of shots
-#    on 5 excitations, which the 4×4 king graph forbids. The final detuning must sit between $U(2a) \approx 0.0156$
-#    and $U(\sqrt2 a)$; at 0.045 the 5-excitation fraction drops to 0.4%.
+# 5. **Choosing the final detuning.** A first schedule ending at $\Delta_f = 0.104$ put 26% of shots on 5 excitations;
+#    lowering it to 0.045 (counting only the $\sqrt2 a$ neighbour) removed those but left 3- and 4-excitation states
+#    nearly degenerate (P(3) = 0.45, P(optimal) = 0.24), because a new excitation typically sits at $2a$ from 2–4
+#    excited atoms and pays $\approx 0.03$–$0.06$ in van der Waals tails. Scanning $\Delta_f \in [0.06, 0.11]$ on R0 at
+#    $T_{\max}$ gives the best exact P(optimal) = 0.696 at $\Delta_f = 0.10$ (P(5) = 0.16), frozen for every rung.
 # 6. **The paper underspecifies wake-cell membership.** Several natural rules (strict vs non-strict inequalities,
 #    tolerances, cell overlap) reproduce R0 but give different optima for long wakes (R1: 2187–2238 kW). We adopt the
 #    rule that reproduces the expected optimum set on every rung.
