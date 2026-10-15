@@ -97,10 +97,12 @@ assert all(_installed(p) == v for p, v in PINNED.items()), "pinned versions not 
 # $0.001 < s \le x + 0.001$ and $t < r\,s - 10^{-9}$ (cells exactly on the cone edge are outside). Wind angles are
 # counted clockwise from west (wind from 0° blows east; rows grow southwards).
 #
-# The explicit margin on the cone edge matters for $r = 1$ (R1, R3): there the edge is at 45°, and diagonal neighbours
-# lie exactly on it for some wind directions. A bare floating-point test `t < r*s` then includes or excludes them
-# depending on rounding (e.g. $\cos 90° \approx 6 \times 10^{-17}$), which breaks the grid's mirror symmetry by up to
-# 4.2 kW. With the margin, every wake matrix is invariant under the symmetries of its wind regime (asserted below).
+# **One rule for every rung.** The same rule builds R0 and our rungs R1–R3. On R0 (and R2) it gives exactly the same
+# wake matrix as a bare test `t < r*s`, so it reproduces the published instance (asserted below). The explicit margin
+# only matters for $r = 1$ (R1, R3), our own definitions: there the cone edge is at 45° and diagonal neighbours lie
+# exactly on it for some wind directions, so a bare floating-point test includes or excludes them depending on
+# rounding (e.g. $\cos 90° \approx 6 \times 10^{-17}$): single entries change by up to 8.3 kW and the grid's mirror
+# symmetry breaks by up to 4.2 kW. With the margin, every wake matrix is invariant under the symmetries of its wind regime (asserted below).
 
 # %%
 A_IND, R_T, V_WIND = 0.1, 0.33, 12.0      # axial induction, turbine radius (grid units), wind speed (m/s)
@@ -126,7 +128,7 @@ def site_coords(L):
     return np.array([(k // L, k % L) for k in range(L * L)], float)   # (row, col)
 
 
-def wake_matrix(L, x, r, regime):
+def wake_matrix(L, x, r, regime, edge_eps=EDGE_EPS):
     """Symmetric pairwise wake penalty W[i, j] (kW) for turbines at sites i and j, summed over both directions."""
     rc = site_coords(L)
     alpha_t = (r - R_T) / x
@@ -137,7 +139,7 @@ def wake_matrix(L, x, r, regime):
         for i, j in itertools.permutations(range(L * L), 2):
             dv = rc[j] - rc[i]
             s, t = dv @ e, abs(dv[0] * e[1] - dv[1] * e[0])
-            if TOL < s <= x + TOL and t < r * s - EDGE_EPS:
+            if TOL < s <= x + TOL and t < r * s - edge_eps:
                 u = V_WIND * (1 - 2 * A_IND / (1 + alpha_t * (np.hypot(*dv) / r) ** 2) ** 2)
                 W[i, j] += p_d * (V_WIND**3 - u**3) / 3
     return W + W.T
@@ -240,6 +242,12 @@ D4 = [_perm(f) for f in (lambda rr, cc: (rr, cc), lambda rr, cc: (cc, L_GRID - 1
 for name, d in INST.items():
     for g in (D4 if d["regime"] == "uniform" else [MIRROR_NS]):
         assert np.allclose(d["W"], d["W"][np.ix_(g, g)], atol=1e-9), name
+
+# The edge margin leaves the published instance untouched; it only changes the r = 1 rungs.
+for name, (x, r, regime) in RUNGS.items():
+    diff = np.abs(wake_matrix(L_GRID, x, r, regime, edge_eps=0.0) - INST[name]["W"]).max()
+    print(f"{name}: max |W(bare t < r s) - W(margin)| = {diff:.2f} kW")
+    assert (diff == 0) == (name in ("R0", "R2"))
 assert opt_sets("R1") <= king_mis4 and opt_sets("R2") <= king_mis4
 assert np.argmax(INST["R0"]["power_all"]) == 2**16 - 1     # without the count penalty, the optimum fills all 16 sites
 print("R0 = MIS on the 4x4 king graph: the 79 optimal layouts are exactly its 79 independent 4-sets")
@@ -364,7 +372,9 @@ assert sa_results[("R0", "SA-swap")]["frac_optimal"] == 1 and sa_results[("R1", 
 # ### 2.3 Published R0 baselines on the same scale
 # Hancock et al. report the mean power of 36 VQE runs as % of optimum (their Table 1, simulator) and show SA as a box
 # plot (their Fig. 9); the SA median below is read off that figure by eye (≈2080 kW) and is approximate. These are
-# their numbers, not reruns.
+# their reported numbers, not reruns; $S$ only re-expresses them against the exact random baseline
+# $P_{\rm random}$(R0) = 2187.70 kW printed in Section 1.2b. On this scale the reported VQE means lie between −0.33 and
+# +0.11, close to random placement, which suggests that "% of optimum" alone overstates performance on R0.
 
 # %%
 PUBLISHED_R0 = {
@@ -373,6 +383,7 @@ PUBLISHED_R0 = {
     "VQE Bayes-0.50 (mean)": 94.6, "VQE Bayes-0.25 (mean)": 93.4,
     "SA, pyqubo/neal (median, read off Fig. 9)": 100 * 2080 / 2304,
 }
+print(f"P_random(R0) = {INST['R0']['P_random']:.2f} kW")
 for label, pct in PUBLISHED_R0.items():
     print(f"{label:44s} {pct:6.2f}% of optimum  S = {norm_score(pct / 100 * INST['R0']['optimum'], INST['R0']):+.2f}")
 
@@ -600,7 +611,7 @@ print("Tier 1: R0 solved natively (emulator)")
 
 # %%
 from scipy.optimize import minimize
-from scipy.stats import spearmanr
+from scipy.stats import kendalltau, spearmanr
 from qoolqit.embedding import InteractionEmbedder
 
 D_MIN, R_MAX = DEVICE.specs["min_distance"], DEVICE.specs["max_radial_distance"]
@@ -690,9 +701,13 @@ plt.show()
 # What decides the outcome is not how well individual couplings match ($\epsilon$) but how the programmed energy
 # $E_{\rm prog}(S) = \sum_{i<j \in S} U_{ij}$ orders the 1,820 four-atom layouts $S$ compared with the true wake
 # penalty $E_{\rm true}(S) = \sum_{i<j \in S} W_{ij}$ (lower = more power). We report the Spearman correlation between the
-# two over all layouts and over the lowest-energy 5% by true energy (91 layouts, where the ground state is decided),
-# the rank of the best true optimum under $E_{\rm prog}$ (0 = it is the programmed ground state), and the gap from the
-# programmed ground state to the next layout. This needs no emulation.
+# two over all layouts; Kendall's $\tau_b$ over the lowest-energy 5% by true energy (91 layouts, where the ground state is
+# decided); the rank of the best true optimum under $E_{\rm prog}$ (0 = it is the programmed ground state); and the gap
+# from the programmed ground state to the next layout. This needs no emulation.
+#
+# **Ties.** $\tau_b$ is used for the tail because it corrects for ties. On R0 and R2 the tail still holds only two
+# distinct true energies (the 79 tied optima and 12 others), so even $\tau_b$ says little there; on those rungs we read
+# the rank of the optimum and P(optimal | 4) instead. On R1 and R3 the tail has 15–18 distinct energies.
 
 # %%
 M4_IDX = np.flatnonzero(WEIGHT == M_TURB)
@@ -712,19 +727,29 @@ def ranking_metrics(pos, d):
     tail = np.argsort(E_true)[:N_TAIL]
     order = np.argsort(E_prog)
     rank = min(int(np.flatnonzero(M4_IDX[order] == o)[0]) for o in d["opt_idx"])
-    return dict(rho_all=float(spearmanr(E_prog, E_true)[0]), rho_tail=float(spearmanr(E_prog[tail], E_true[tail])[0]),
-                opt_rank=rank, gap=float(E_prog[order[1]] - E_prog[order[0]]),
+    return dict(rho_all=float(spearmanr(E_prog, E_true)[0]),
+                tau_tail=float(kendalltau(E_prog[tail], E_true[tail], variant="b")[0]),
+                tail_levels=int(len(np.unique(np.round(E_true[tail], 6)))), opt_rank=rank, gap=float(E_prog[order[1]] - E_prog[order[0]]),
                 ground_norm=float(norm_score(d["power_all"][M4_IDX[order[0]]], d)))
 
 
 ranking = {}
-print("rung enc  eps    rho(all) rho(low 5%)  optimum rank  gap")
+print("rung enc  eps    rho(all)  tau_b(low 5%) [levels]  optimum rank  gap")
 for name, d in INST.items():
     for enc, pos in (("A", GRID_POS), ("B", embedding[name]["pos"]), ("IE", embedding[name]["pos_ie"])):
         g = ranking[(name, enc)] = dict(eps=embed_metrics(pos, d["W"])["eps"], **ranking_metrics(pos, d))
-        print(f" {name}  {enc:2s}  {g['eps']:.3f}   {g['rho_all']:+.3f}    {g['rho_tail']:+.3f}       {g['opt_rank']:4d}     {g['gap']:.1e}")
+        print(f" {name}  {enc:2s}  {g['eps']:.3f}   {g['rho_all']:+.3f}    {g['tau_tail']:+.3f}  [{g['tail_levels']:2d}]"
+              f"         {g['opt_rank']:4d}     {g['gap']:.1e}")
 assert all(ranking[(n, e)]["opt_rank"] == 0 for n in ("R1", "R2") for e in ("A", "B"))
 assert ranking[("R3", "A")]["opt_rank"] > 0 and ranking[("R3", "B")]["opt_rank"] > 0
+
+# R3: B's layout differs from the grid, yet both give the optimum the same rank.
+disp = np.linalg.norm(embedding["R3"]["pos"] - (GRID_POS - GRID_POS.mean(0)), axis=1)
+ahead = {enc: set(M4_IDX[np.argsort(programmed_energy(pos), kind="stable")[:ranking[("R3", enc)]["opt_rank"]]].tolist())
+         for enc, pos in (("A", GRID_POS), ("B", embedding["R3"]["pos"]))}
+print(f"R3 B displacement from the grid: max {disp.max():.2f}, mean {disp.mean():.2f} (grid spacing 1); "
+      f"same {len(ahead['A'])} layouts ranked ahead of the optima under A and B: {ahead['A'] == ahead['B']}")
+assert disp.max() > 0.3 and ahead["A"] == ahead["B"]
 
 # %% [markdown]
 # **Pairwise $\epsilon$ does not predict solution quality.** Among the embedded registers, R1 has the worst $\epsilon$ yet
@@ -734,6 +759,10 @@ assert ranking[("R3", "A")]["opt_rank"] > 0 and ranking[("R3", "B")]["opt_rank"]
 # for Encoding A this is structural (the optima put turbines on grid-diagonal neighbours, which the blockade forbids);
 # for Encoding B the positions are free, so it is a property of this fit, not a proof that no embedding could work.
 # `InteractionEmbedder` (shipped defaults) orders the layouts poorly on every rung.
+#
+# On R3, B moves atoms by up to about half a grid spacing, yet the optima keep rank 355 because exactly the same 355
+# layouts are programmed below them under A and B: the fit, started from the grid, preserves the grid's ordering of the
+# low-energy block.
 
 # %%
 def tune_and_run(register, d, omegas, deltas, tag):
@@ -747,7 +776,7 @@ def tune_and_run(register, d, omegas, deltas, tag):
             log_row(tag=tag, omega=om, delta_f=df, **scan_pts[(om, df)][0])
     om, df = max(scan_pts, key=lambda k: scan_pts[k][0]["P4"])
     return dict(omega=om, delta_f=df, exact=scan_pts[(om, df)][0],
-                resampled=resample_selection(scan_pts[(om, df)][1], d),
+                resampled=resample_selection(scan_pts[(om, df)][1], d), probs=scan_pts[(om, df)][1],
                 p4_grid={k: v[0]["P4"] for k, v in scan_pts.items()})
 
 
@@ -787,12 +816,13 @@ if MODE == "full":
 # %% [markdown]
 # ### 3.8 R3 probes (time-boxed)
 # Two attempts to make R3's optimum the programmed ground state, both selected by the low-energy-tail ranking metric
-# (Spearman over the best 5% of layouts), never by the optimum's rank, which is reported only as the outcome.
+# (Kendall $\tau_b$ over the best 5% of layouts), never by the optimum's rank, which is reported only as the outcome.
 #
 # 1. **Anisotropic lattice.** Atoms on a rectangular lattice with along-wind (west–east) spacing $a_x$ and cross-wind
 #    spacing $a_y$, the smaller of the two equal to the device minimum; one scan over the aspect ratio $a_y / a_x$.
 #    Over all layouts the correlation prefers cross-wind stretching, over the low-energy tail along-wind stretching;
-#    we select by the tail, which decides the ground state.
+#    we select by the tail, which decides the ground state. The tail metric is flat for $a_y/a_x$ between 0.25 and 0.42,
+#    and stretching much beyond 0.25 would exceed the device's maximum radial distance.
 # 2. **Ranking-aware fit (non-scalable upper-bound probe).** Positions fitted to maximise a weighted Pearson
 #    correlation between $E_{\rm prog}$ and $E_{\rm true}$ over all 1,820 layouts, from the grid, the Encoding B layout
 #    and 20 random starts. Tail weightings (rest-of-layouts weight 0.1, 0.01, 0) are compared by the same tail metric.
@@ -810,10 +840,10 @@ def rect_lattice(aspect):
 
 
 aspect_scan = {a: ranking_metrics(rect_lattice(a), INST["R3"]) for a in ASPECTS}
-print("a_y/a_x  rho(all)  rho(low 5%)  optimum rank")
+print("a_y/a_x  rho(all)  tau_b(low 5%)  optimum rank")
 for a, g in aspect_scan.items():
-    print(f" {a:5.3f}   {g['rho_all']:+.3f}    {g['rho_tail']:+.3f}       {g['opt_rank']:4d}")
-ASPECT_R3 = max(aspect_scan, key=lambda a: aspect_scan[a]["rho_tail"])
+    print(f" {a:5.3f}   {g['rho_all']:+.3f}    {g['tau_tail']:+.3f}       {g['opt_rank']:4d}")
+ASPECT_R3 = max(aspect_scan, key=lambda a: aspect_scan[a]["tau_tail"])
 print(f"selected a_y/a_x = {ASPECT_R3:.3f}: optimum rank {aspect_scan[ASPECT_R3]['opt_rank']}")
 
 # %%
@@ -847,7 +877,7 @@ def ranking_fit(d, w_rest, n_random=20, seed=SEED, penalty=1e3):
         pos = res.x.reshape(-1, 2)
         pos = (pos - pos.mean(0)) / np.linalg.norm(pos[:, None] - pos[None], axis=-1)[IU].min() * D_MIN * (1 + 1e-6)
         fits.append((ranking_metrics(pos, d), pos))
-    return max(fits, key=lambda f: f[0]["rho_tail"])
+    return max(fits, key=lambda f: f[0]["tau_tail"])
 
 
 name_probe = "R3"
@@ -856,9 +886,9 @@ for w_rest in (0.1, 0.01, 0.0):
     t0 = time.perf_counter()
     g, pos = ranking_fit(INST["R3"], w_rest)
     rank_fits[w_rest] = (g, pos)
-    print(f"weight outside the tail {w_rest}: rho(all) {g['rho_all']:+.3f}, rho(low 5%) {g['rho_tail']:+.3f}, "
+    print(f"weight outside the tail {w_rest}: rho(all) {g['rho_all']:+.3f}, tau_b(low 5%) {g['tau_tail']:+.3f}, "
           f"optimum rank {g['opt_rank']}, {time.perf_counter() - t0:.0f} s")
-W_REST = max(rank_fits, key=lambda w: rank_fits[w][0]["rho_tail"])
+W_REST = max(rank_fits, key=lambda w: rank_fits[w][0]["tau_tail"])
 POS_RANKFIT_R3 = rank_fits[W_REST][1]
 assert np.linalg.norm(POS_RANKFIT_R3 - POS_RANKFIT_R3.mean(0), axis=1).max() <= R_MAX
 print(f"selected weighting {W_REST}: optimum rank {rank_fits[W_REST][0]['opt_rank']}")
@@ -873,6 +903,43 @@ if MODE == "full":
         print(f"R3 {label}: selected Omega {r['omega']:.4f}, Delta_f {r['delta_f']}, P(4) {r['exact']['P4']:.3f}")
 
 # %% [markdown]
+# **Why the R3 probes score below random: dynamics or fit?** From the exact final states already computed (no new
+# emulation), take the 10 most probable 4-turbine layouts for each R3 program and look up their rank under that
+# program's own energy $E_{\rm prog}$ (0 = programmed ground state, of 1,820). Programmed-*high*-energy layouts carrying
+# the weight means the evolution was not adiabatic (diabatic dynamics); programmed-*low*-energy layouts that are truly
+# bad means the encoding itself misranks them (fit error).
+
+# %%
+def top_shot_diagnosis(probs, pos, d, k=10):
+    E_prog = programmed_energy(pos)
+    prog_rank = np.empty(len(M4_IDX), int)
+    prog_rank[np.argsort(E_prog, kind="stable")] = np.arange(len(M4_IDX))
+    top = np.argsort(probs[M4_IDX])[::-1][:k]
+    return dict(prog_rank=prog_rank[top].tolist(), S=norm_score(d["power_all"][M4_IDX[top]], d).round(3).tolist(),
+                prob=probs[M4_IDX[top]].round(4).tolist())
+
+
+diagnosis = {}
+if MODE == "full":
+    for label, probs, pos in (("A", PROBS_A, GRID_POS), ("B", results_B["R3"]["probs"], embedding["R3"]["pos"]),
+                              ("B-lattice", results_R3_probe["lattice"]["probs"], rect_lattice(ASPECT_R3)),
+                              ("B-rankfit", results_R3_probe["rankfit"]["probs"], POS_RANKFIT_R3)):
+        g = diagnosis[label] = top_shot_diagnosis(probs, pos, INST["R3"])
+        print(f"R3 {label:9s} top-10 4-turbine shots: programmed rank {g['prog_rank']}")
+        print(f"{'':13s} true S {g['S']}")
+
+# %% [markdown]
+# **Diagnosis (full run).**
+# - **A and B:** the most probable shots are the programmed ground state and its nearest neighbours in energy (ranks
+#   0–10 for A, 0–30 for B), so the dynamics roughly follow each program's own low-energy layouts. The loss on R3 is in
+#   the encoding: those layouts score $S$ = +0.65 to +0.93 but are not optimal.
+# - **Anisotropic lattice: mainly fit error.** Its two most probable shots *are* its programmed ground and first excited
+#   layouts, but they are truly mediocre ($S$ = +0.40); further weight sits on programmed ranks 16–21 and 134–135 with
+#   $S$ down to −0.66, so some diabatic spreading adds to it.
+# - **Ranking-aware fit: diabatic dynamics.** Its most probable shots sit at programmed ranks 34–309, far above its
+#   ground state, so the better ranking it was fitted for is never reached in the finite sweep.
+
+# %% [markdown]
 # ### 3.9 Encoding A vs B (exact final states; S = normalised score)
 
 # %%
@@ -882,11 +949,11 @@ if MODE == "full":
     rows += [("R3", "B-lattice", results_R3_probe["lattice"], aspect_scan[ASPECT_R3]),
              ("R3", "B-rankfit*", results_R3_probe["rankfit"], rank_fits[W_REST][0])]
     rows.sort(key=lambda r: r[0])
-    print("rung encoding    P(4)   P(opt)  P(opt|4)  E[S|4]  mode-of-4 S  36x500 sel.opt  rho(low5%)  opt rank")
+    print("rung encoding    P(4)   P(opt)  P(opt|4)  E[S|4]  mode-of-4 S  36x500 sel.opt  tau_b(low5%)  opt rank")
     for n, enc, res, g in rows:
         e, rs = res["exact"], res["resampled"]
         print(f" {n}  {enc:11s} {e['P4']:.3f}  {e['P_opt']:.4f}  {e['P_opt_given_4']:.4f}  {e['exp_norm_given_4']:+.3f}"
-              f"     {e['mode4_norm']:+.3f}       {round(rs['frac_selected_optimal'] * 36):2d}/36       {g['rho_tail']:+.3f}"
+              f"     {e['mode4_norm']:+.3f}       {round(rs['frac_selected_optimal'] * 36):2d}/36       {g['tau_tail']:+.3f}"
               f"     {g['opt_rank']:4d}")
     print("* non-scalable upper-bound probe (enumerates all C(16, 4) layouts)")
 
@@ -898,14 +965,969 @@ if MODE == "full":
 # - **R2:** both share the true optimum as ground state, so B's lower P(optimal) (0.34 vs 0.70) is a dynamics effect:
 #   its gap is about 5× smaller and its best P(4) is 0.48.
 # - **R3:** no encoding reaches the optimum (P(optimal) ≤ 0.0005). The two probes improve the tail ranking metric
-#   (0.62 → 0.74 and 0.83) and move the optimum's rank from 355 to 309 and 40, but the solutions get *worse*: the expected
-#   normalised score of a 4-turbine shot drops from +0.80 (A) to −0.02 (lattice) and −0.18 (ranking fit), i.e. to or
-#   below random placement. A better-ranked programmed spectrum does not survive the finite-time dynamics here.
+#   ($\tau_b$ 0.50 for A → 0.57 and 0.66) and move the optimum's rank from 355 to 176 and 40, but the solutions get
+#   *worse*: the expected normalised score of a 4-turbine shot drops from +0.80 (A) to −0.09 (lattice) and −0.18
+#   (ranking fit), i.e. to or below random placement. The diagnosis above attributes this mainly to fit error for the
+#   lattice and to diabatic dynamics for the ranking fit.
 
 # %% [markdown]
 # ## 4. Results
-# *(Phase 4: comparison table and % of optimum vs rung.)*
-#
+# ### 4.1 Results record
+# The full run (`MODE = "full"`, remote GPU, about 30 min) produces the record below, pasted here as a JSON literal so
+# the notebook reads no external files. Demo mode recomputes everything that does not need Encoding B or the R3 probes
+# (instances, SA, Encoding A on all rungs from the R0 state, embeddings and ranking metrics) and checks it against the
+# record; Encoding B, the R3 probes and the Ω check are read from the record.
+
+# %%
+FULL_RESULTS = json.loads(r"""{
+ "meta": {
+  "mode": "full",
+  "seed": 20261018,
+  "gpu": true,
+  "versions": {
+   "qoolqit": "1.4.0",
+   "pulser-core": "1.9.1",
+   "pulser-simulation": "1.9.1",
+   "emu-sv": "2.9.1",
+   "emu-base": "2.9.1",
+   "torch": "2.14.1",
+   "numpy": "2.4.6",
+   "scipy": "1.17.1",
+   "matplotlib": "3.11.2"
+  }
+ },
+ "instances": {
+  "R0": {
+   "optimum": 2304.0,
+   "n_optima": 79,
+   "P_random": 2187.702911
+  },
+  "R1": {
+   "optimum": 2229.381159,
+   "n_optima": 1,
+   "P_random": 2019.340925
+  },
+  "R2": {
+   "optimum": 2304.0,
+   "n_optima": 79,
+   "P_random": 2160.132048
+  },
+  "R3": {
+   "optimum": 2242.7081,
+   "n_optima": 2,
+   "P_random": 2064.97052
+  }
+ },
+ "sa": {
+  "R0|SA-QUBO": {
+   "mean_pct": 99.809226,
+   "median_pct": 100.0,
+   "min_pct": 98.473806,
+   "mean_norm": 0.962205,
+   "frac_optimal": 0.777778,
+   "frac_m_turbines": 1.0
+  },
+  "R0|SA-swap": {
+   "mean_pct": 100.0,
+   "median_pct": 100.0,
+   "min_pct": 100.0,
+   "mean_norm": 1.0,
+   "frac_optimal": 1.0,
+   "frac_m_turbines": 1.0
+  },
+  "R1|SA-QUBO": {
+   "mean_pct": 96.772561,
+   "median_pct": 96.503341,
+   "min_pct": 93.262602,
+   "mean_norm": 0.657438,
+   "frac_optimal": 0.111111,
+   "frac_m_turbines": 1.0
+  },
+  "R1|SA-swap": {
+   "mean_pct": 100.0,
+   "median_pct": 100.0,
+   "min_pct": 100.0,
+   "mean_norm": 1.0,
+   "frac_optimal": 1.0,
+   "frac_m_turbines": 1.0
+  },
+  "R2|SA-QUBO": {
+   "mean_pct": 99.818299,
+   "median_pct": 100.0,
+   "min_pct": 99.065537,
+   "mean_norm": 0.970901,
+   "frac_optimal": 0.805556,
+   "frac_m_turbines": 1.0
+  },
+  "R2|SA-swap": {
+   "mean_pct": 99.922128,
+   "median_pct": 100.0,
+   "min_pct": 99.065537,
+   "mean_norm": 0.987529,
+   "frac_optimal": 0.916667,
+   "frac_m_turbines": 1.0
+  },
+  "R3|SA-QUBO": {
+   "mean_pct": 98.294703,
+   "median_pct": 98.564511,
+   "min_pct": 95.723125,
+   "mean_norm": 0.784824,
+   "frac_optimal": 0.027778,
+   "frac_m_turbines": 1.0
+  },
+  "R3|SA-swap": {
+   "mean_pct": 100.0,
+   "median_pct": 100.0,
+   "min_pct": 100.0,
+   "mean_norm": 1.0,
+   "frac_optimal": 1.0,
+   "frac_m_turbines": 1.0
+  }
+ },
+ "A": {
+  "R0": {
+   "exact": {
+    "P3": 0.099173,
+    "P4": 0.733293,
+    "P5": 0.16309,
+    "P_opt": 0.695962,
+    "P_opt_given_4": 0.949091,
+    "exp_pct_given_4": 99.960939,
+    "exp_norm_given_4": 0.992261,
+    "mode4_pct": 100.0,
+    "mode4_norm": 1.0
+   },
+   "resampled": {
+    "mean_pct": 100.0,
+    "median_pct": 100.0,
+    "min_pct": 100.0,
+    "mean_norm": 1.0,
+    "frac_selected_optimal": 1.0,
+    "mean_P_opt_shot": 0.700167,
+    "mean_valid_rate": 0.737389,
+    "n_no_valid": 0
+   }
+  },
+  "R1": {
+   "exact": {
+    "P3": 0.099173,
+    "P4": 0.733293,
+    "P5": 0.16309,
+    "P_opt": 0.319738,
+    "P_opt_given_4": 0.43603,
+    "exp_pct_given_4": 98.98623,
+    "exp_norm_given_4": 0.892398,
+    "mode4_pct": 100.0,
+    "mode4_norm": 1.0
+   },
+   "resampled": {
+    "mean_pct": 100.0,
+    "median_pct": 100.0,
+    "min_pct": 100.0,
+    "mean_norm": 1.0,
+    "frac_selected_optimal": 1.0,
+    "mean_P_opt_shot": 0.313611,
+    "mean_valid_rate": 0.7285,
+    "n_no_valid": 0
+   }
+  },
+  "R2": {
+   "exact": {
+    "P3": 0.099173,
+    "P4": 0.733293,
+    "P5": 0.16309,
+    "P_opt": 0.695962,
+    "P_opt_given_4": 0.949091,
+    "exp_pct_given_4": 99.859388,
+    "exp_norm_given_4": 0.977481,
+    "mode4_pct": 100.0,
+    "mode4_norm": 1.0
+   },
+   "resampled": {
+    "mean_pct": 100.0,
+    "median_pct": 100.0,
+    "min_pct": 100.0,
+    "mean_norm": 1.0,
+    "frac_selected_optimal": 1.0,
+    "mean_P_opt_shot": 0.695056,
+    "mean_valid_rate": 0.732722,
+    "n_no_valid": 0
+   }
+  },
+  "R3": {
+   "exact": {
+    "P3": 0.099173,
+    "P4": 0.733293,
+    "P5": 0.16309,
+    "P_opt": 0.0,
+    "P_opt_given_4": 0.0,
+    "exp_pct_given_4": 98.390267,
+    "exp_norm_given_4": 0.796883,
+    "mode4_pct": 99.405766,
+    "mode4_norm": 0.925019
+   },
+   "resampled": {
+    "mean_pct": 99.405766,
+    "median_pct": 99.405766,
+    "min_pct": 99.405766,
+    "mean_norm": 0.925019,
+    "frac_selected_optimal": 0.0,
+    "mean_P_opt_shot": 0.0,
+    "mean_valid_rate": 0.729056,
+    "n_no_valid": 0
+   }
+  }
+ },
+ "A_schedule": {
+  "omega": 0.041429,
+  "delta_0": -0.1,
+  "delta_f": 0.1,
+  "T": 332.43764
+ },
+ "delta_scan_R0": {
+  "0.06": {
+   "P3": 0.399307,
+   "P4": 0.464661,
+   "P5": 0.024207,
+   "P_opt": 0.436089,
+   "P_opt_given_4": 0.93851,
+   "exp_pct_given_4": 99.952811,
+   "exp_norm_given_4": 0.990651,
+   "mode4_pct": 100.0,
+   "mode4_norm": 1.0
+  },
+  "0.07": {
+   "P3": 0.320763,
+   "P4": 0.583009,
+   "P5": 0.038566,
+   "P_opt": 0.550158,
+   "P_opt_given_4": 0.943651,
+   "exp_pct_given_4": 99.95673,
+   "exp_norm_given_4": 0.991428,
+   "mode4_pct": 100.0,
+   "mode4_norm": 1.0
+  },
+  "0.08": {
+   "P3": 0.232204,
+   "P4": 0.675501,
+   "P5": 0.064963,
+   "P_opt": 0.638312,
+   "P_opt_given_4": 0.944945,
+   "exp_pct_given_4": 99.957734,
+   "exp_norm_given_4": 0.991627,
+   "mode4_pct": 100.0,
+   "mode4_norm": 1.0
+  },
+  "0.09": {
+   "P3": 0.154359,
+   "P4": 0.725167,
+   "P5": 0.108768,
+   "P_opt": 0.685646,
+   "P_opt_given_4": 0.945501,
+   "exp_pct_given_4": 99.958182,
+   "exp_norm_given_4": 0.991715,
+   "mode4_pct": 100.0,
+   "mode4_norm": 1.0
+  },
+  "0.1": {
+   "P3": 0.099173,
+   "P4": 0.733293,
+   "P5": 0.16309,
+   "P_opt": 0.695962,
+   "P_opt_given_4": 0.949091,
+   "exp_pct_given_4": 99.960939,
+   "exp_norm_given_4": 0.992261,
+   "mode4_pct": 100.0,
+   "mode4_norm": 1.0
+  },
+  "0.11": {
+   "P3": 0.067208,
+   "P4": 0.706725,
+   "P5": 0.224191,
+   "P_opt": 0.672444,
+   "P_opt_given_4": 0.951494,
+   "exp_pct_given_4": 99.962707,
+   "exp_norm_given_4": 0.992612,
+   "mode4_pct": 100.0,
+   "mode4_norm": 1.0
+  }
+ },
+ "embedding": {
+  "R0": {
+   "eps": 0.073497,
+   "spearman": 0.845015,
+   "eps_ie": 0.911254
+  },
+  "R1": {
+   "eps": 0.552347,
+   "spearman": 0.988144,
+   "eps_ie": 0.88075
+  },
+  "R2": {
+   "eps": 0.470304,
+   "spearman": 0.82204,
+   "eps_ie": 0.77167
+  },
+  "R3": {
+   "eps": 0.46885,
+   "spearman": 0.689072,
+   "eps_ie": 0.810915
+  }
+ },
+ "ranking": {
+  "R0|A": {
+   "eps": 0.073541,
+   "rho_all": 0.991138,
+   "tau_tail": 0.491581,
+   "tail_levels": 2,
+   "opt_rank": 0,
+   "gap": 0.014165,
+   "ground_norm": 1.0
+  },
+  "R0|B": {
+   "eps": 0.073497,
+   "rho_all": 0.991057,
+   "tau_tail": 0.481146,
+   "tail_levels": 2,
+   "opt_rank": 0,
+   "gap": 0.014093,
+   "ground_norm": 1.0
+  },
+  "R0|IE": {
+   "eps": 0.911254,
+   "rho_all": 0.198625,
+   "tau_tail": 0.166473,
+   "tail_levels": 2,
+   "opt_rank": 8,
+   "gap": 6e-06,
+   "ground_norm": 0.280051
+  },
+  "R1|A": {
+   "eps": 0.552523,
+   "rho_all": 0.908652,
+   "tau_tail": 0.676336,
+   "tail_levels": 15,
+   "opt_rank": 0,
+   "gap": 0.014165,
+   "ground_norm": 1.0
+  },
+  "R1|B": {
+   "eps": 0.552347,
+   "rho_all": 0.900567,
+   "tau_tail": 0.615475,
+   "tail_levels": 15,
+   "opt_rank": 0,
+   "gap": 0.013717,
+   "ground_norm": 1.0
+  },
+  "R1|IE": {
+   "eps": 0.88075,
+   "rho_all": 0.297761,
+   "tau_tail": 0.171526,
+   "tail_levels": 15,
+   "opt_rank": 177,
+   "gap": 8.3e-05,
+   "ground_norm": -0.402215
+  },
+  "R2|A": {
+   "eps": 0.663537,
+   "rho_all": 0.719304,
+   "tau_tail": 0.491393,
+   "tail_levels": 2,
+   "opt_rank": 0,
+   "gap": 0.014165,
+   "ground_norm": 1.0
+  },
+  "R2|B": {
+   "eps": 0.470304,
+   "rho_all": 0.826692,
+   "tau_tail": 0.481146,
+   "tail_levels": 2,
+   "opt_rank": 0,
+   "gap": 0.002732,
+   "ground_norm": 1.0
+  },
+  "R2|IE": {
+   "eps": 0.77167,
+   "rho_all": 0.458999,
+   "tau_tail": -0.00609,
+   "tail_levels": 2,
+   "opt_rank": 7,
+   "gap": 3.8e-05,
+   "ground_norm": 0.120105
+  },
+  "R3|A": {
+   "eps": 0.700706,
+   "rho_all": 0.610369,
+   "tau_tail": 0.495855,
+   "tail_levels": 18,
+   "opt_rank": 355,
+   "gap": 0.014165,
+   "ground_norm": 0.925019
+  },
+  "R3|B": {
+   "eps": 0.46885,
+   "rho_all": 0.819674,
+   "tau_tail": 0.384931,
+   "tail_levels": 18,
+   "opt_rank": 355,
+   "gap": 0.001854,
+   "ground_norm": 0.925019
+  },
+  "R3|IE": {
+   "eps": 0.810915,
+   "rho_all": 0.410135,
+   "tau_tail": -0.047299,
+   "tail_levels": 18,
+   "opt_rank": 297,
+   "gap": 3.9e-05,
+   "ground_norm": 0.824326
+  }
+ },
+ "R3_probe_selection": {
+  "aspect": 0.25,
+  "aspect_metrics": {
+   "rho_all": 0.005853,
+   "tau_tail": 0.569326,
+   "tail_levels": 18,
+   "opt_rank": 176,
+   "gap": 0.0,
+   "ground_norm": 0.404321
+  },
+  "w_rest": 0.0,
+  "rankfit_metrics": {
+   "rho_all": -0.125499,
+   "tau_tail": 0.657654,
+   "tail_levels": 18,
+   "opt_rank": 40,
+   "gap": 0.000193,
+   "ground_norm": -0.741594
+  }
+ },
+ "omega_check_R0": [
+  [
+   0.041429,
+   0.09,
+   0.154359,
+   0.725167,
+   0.108768,
+   0.685646
+  ],
+  [
+   0.041429,
+   0.1,
+   0.099173,
+   0.733293,
+   0.16309,
+   0.695962
+  ],
+  [
+   0.041429,
+   0.11,
+   0.067208,
+   0.706725,
+   0.224191,
+   0.672444
+  ],
+  [
+   0.082858,
+   0.09,
+   0.23948,
+   0.635001,
+   0.090896,
+   0.601979
+  ],
+  [
+   0.082858,
+   0.1,
+   0.16494,
+   0.655709,
+   0.162814,
+   0.612362
+  ],
+  [
+   0.082858,
+   0.11,
+   0.106552,
+   0.636747,
+   0.249892,
+   0.592405
+  ],
+  [
+   0.226804,
+   0.09,
+   0.277445,
+   0.502196,
+   0.153124,
+   0.403042
+  ],
+  [
+   0.226804,
+   0.1,
+   0.238214,
+   0.51699,
+   0.2082,
+   0.379896
+  ],
+  [
+   0.226804,
+   0.11,
+   0.249437,
+   0.482392,
+   0.225984,
+   0.326175
+  ]
+ ],
+ "B": {
+  "R1": {
+   "omega": 0.041429,
+   "delta_f": 0.1,
+   "exact": {
+    "P3": 0.095287,
+    "P4": 0.715929,
+    "P5": 0.184548,
+    "P_opt": 0.317424,
+    "P_opt_given_4": 0.443374,
+    "exp_pct_given_4": 98.974401,
+    "exp_norm_given_4": 0.891142,
+    "mode4_pct": 100.0,
+    "mode4_norm": 1.0
+   },
+   "resampled": {
+    "mean_pct": 100.0,
+    "median_pct": 100.0,
+    "min_pct": 100.0,
+    "mean_norm": 1.0,
+    "frac_selected_optimal": 1.0,
+    "mean_P_opt_shot": 0.318222,
+    "mean_valid_rate": 0.718722,
+    "n_no_valid": 0
+   }
+  },
+  "R2": {
+   "omega": 0.082858,
+   "delta_f": 0.1,
+   "exact": {
+    "P3": 0.134564,
+    "P4": 0.479697,
+    "P5": 0.370689,
+    "P_opt": 0.337222,
+    "P_opt_given_4": 0.702991,
+    "exp_pct_given_4": 99.044213,
+    "exp_norm_given_4": 0.846934,
+    "mode4_pct": 100.0,
+    "mode4_norm": 1.0
+   },
+   "resampled": {
+    "mean_pct": 100.0,
+    "median_pct": 100.0,
+    "min_pct": 100.0,
+    "mean_norm": 1.0,
+    "frac_selected_optimal": 1.0,
+    "mean_P_opt_shot": 0.334056,
+    "mean_valid_rate": 0.474944,
+    "n_no_valid": 0
+   }
+  },
+  "R3": {
+   "omega": 0.082858,
+   "delta_f": 0.06,
+   "exact": {
+    "P3": 0.289653,
+    "P4": 0.40115,
+    "P5": 0.208683,
+    "P_opt": 0.000481,
+    "P_opt_given_4": 0.001199,
+    "exp_pct_given_4": 97.024711,
+    "exp_norm_given_4": 0.624576,
+    "mode4_pct": 97.220072,
+    "mode4_norm": 0.649226
+   },
+   "resampled": {
+    "mean_pct": 98.093443,
+    "median_pct": 98.564511,
+    "min_pct": 97.220072,
+    "mean_norm": 0.759429,
+    "frac_selected_optimal": 0.0,
+    "mean_P_opt_shot": 0.000556,
+    "mean_valid_rate": 0.401056,
+    "n_no_valid": 0
+   }
+  }
+ },
+ "R3_probes": {
+  "lattice": {
+   "omega": 0.041429,
+   "delta_f": 0.02,
+   "exact": {
+    "P3": 0.138737,
+    "P4": 0.263005,
+    "P5": 0.548955,
+    "P_opt": 0.000425,
+    "P_opt_given_4": 0.001615,
+    "exp_pct_given_4": 91.354433,
+    "exp_norm_given_4": -0.090905,
+    "mode4_pct": 95.279162,
+    "mode4_norm": 0.404321
+   },
+   "resampled": {
+    "mean_pct": 88.099331,
+    "median_pct": 89.658242,
+    "min_pct": 70.719224,
+    "mean_norm": -0.501637,
+    "frac_selected_optimal": 0.0,
+    "mean_P_opt_shot": 0.000611,
+    "mean_valid_rate": 0.263167,
+    "n_no_valid": 0
+   }
+  },
+  "rankfit": {
+   "omega": 0.226804,
+   "delta_f": 0.06,
+   "exact": {
+    "P3": 0.246739,
+    "P4": 0.355643,
+    "P5": 0.311827,
+    "P_opt": 0.00027,
+    "P_opt_given_4": 0.00076,
+    "exp_pct_given_4": 90.625967,
+    "exp_norm_given_4": -0.182824,
+    "mode4_pct": 86.197641,
+    "mode4_norm": -0.741594
+   },
+   "resampled": {
+    "mean_pct": 90.148795,
+    "median_pct": 89.141473,
+    "min_pct": 82.371041,
+    "mean_norm": -0.243033,
+    "frac_selected_optimal": 0.0,
+    "mean_P_opt_shot": 0.000278,
+    "mean_valid_rate": 0.358778,
+    "n_no_valid": 0
+   }
+  }
+ },
+ "R3_diagnosis": {
+  "A": {
+   "prog_rank": [
+    0,
+    1,
+    3,
+    2,
+    4,
+    6,
+    7,
+    8,
+    5,
+    10
+   ],
+   "S": [
+    0.925,
+    0.819,
+    0.819,
+    0.819,
+    0.819,
+    0.667,
+    0.667,
+    0.667,
+    0.667,
+    0.692
+   ],
+   "prob": [
+    0.3197,
+    0.032,
+    0.032,
+    0.032,
+    0.032,
+    0.032,
+    0.032,
+    0.032,
+    0.032,
+    0.0127
+   ]
+  },
+  "B": {
+   "prog_rank": [
+    8,
+    7,
+    4,
+    3,
+    1,
+    2,
+    0,
+    29,
+    30,
+    27
+   ],
+   "S": [
+    0.649,
+    0.649,
+    0.819,
+    0.819,
+    0.819,
+    0.819,
+    0.925,
+    0.667,
+    0.667,
+    0.667
+   ],
+   "prob": [
+    0.0119,
+    0.0119,
+    0.0109,
+    0.0109,
+    0.0109,
+    0.0109,
+    0.0098,
+    0.0076,
+    0.0076,
+    0.0076
+   ]
+  },
+  "B-lattice": {
+   "prog_rank": [
+    0,
+    1,
+    17,
+    16,
+    18,
+    20,
+    21,
+    19,
+    134,
+    135
+   ],
+   "S": [
+    0.404,
+    0.404,
+    0.132,
+    0.132,
+    -0.309,
+    -0.309,
+    -0.309,
+    -0.309,
+    -0.657,
+    -0.657
+   ],
+   "prob": [
+    0.0016,
+    0.0016,
+    0.0016,
+    0.0016,
+    0.0016,
+    0.0016,
+    0.0016,
+    0.0016,
+    0.0016,
+    0.0016
+   ]
+  },
+  "B-rankfit": {
+   "prog_rank": [
+    65,
+    213,
+    214,
+    35,
+    34,
+    38,
+    39,
+    309,
+    135,
+    137
+   ],
+   "S": [
+    -0.742,
+    -0.582,
+    -0.582,
+    0.191,
+    0.191,
+    -0.324,
+    -0.324,
+    -0.869,
+    0.515,
+    0.515
+   ],
+   "prob": [
+    0.0066,
+    0.005,
+    0.005,
+    0.0043,
+    0.0042,
+    0.0041,
+    0.0041,
+    0.0038,
+    0.0033,
+    0.0033
+   ]
+  }
+ }
+}""")
+
+
+def _clean(x):
+    if isinstance(x, dict):
+        return {str(k): _clean(v) for k, v in x.items() if k not in ("probs", "p4_grid")}
+    if isinstance(x, (list, tuple)):
+        return [_clean(v) for v in x]
+    if isinstance(x, (np.floating, float)):
+        return round(float(x), 6)
+    if isinstance(x, (np.integer,)):
+        return int(x)
+    return x
+
+
+def collect_results():
+    rec = {
+        "meta": {"mode": MODE, "seed": SEED, "gpu": GPU, "versions": {p: _installed(p) for p in PINNED}},
+        "instances": {n: dict(optimum=d["optimum"], n_optima=len(d["opt_idx"]), P_random=d["P_random"]) for n, d in INST.items()},
+        "sa": {f"{n}|{m}": dict(v) for (n, m), v in sa_results.items()},
+        "A": {n: dict(exact=v["exact"], resampled=v["resampled"]) for n, v in results_A.items()},
+        "A_schedule": dict(omega=OMEGA_A, delta_0=DELTA_0_A, delta_f=DELTA_F_A, T=T_MAX),
+        "delta_scan_R0": {str(df): {k: v for k, v in m.items() if k != "probs"} for df, m in scan.items()},
+        "embedding": {n: dict(eps=v["ours"]["eps"], spearman=v["ours"]["spearman"], eps_ie=v["interaction_embedder"]["eps"])
+                      for n, v in embedding.items()},
+        "ranking": {f"{n}|{e}": v for (n, e), v in ranking.items()},
+        "R3_probe_selection": dict(aspect=ASPECT_R3, aspect_metrics=aspect_scan[ASPECT_R3], w_rest=W_REST,
+                                   rankfit_metrics=rank_fits[W_REST][0]),
+    }
+    for g in rec["sa"].values():
+        g.pop("wall_s", None)
+    for m in rec["delta_scan_R0"].values():
+        m.pop("wall_s", None)
+    if MODE == "full":
+        rec["omega_check_R0"] = [list(row) for row in omega_check]
+        rec["B"] = {n: dict(omega=v["omega"], delta_f=v["delta_f"], exact=v["exact"], resampled=v["resampled"],
+                            p4_grid=[[om, df, p4] for (om, df), p4 in v["p4_grid"].items()]) for n, v in results_B.items()}
+        rec["R3_probes"] = {k: dict(omega=v["omega"], delta_f=v["delta_f"], exact=v["exact"], resampled=v["resampled"])
+                            for k, v in results_R3_probe.items()}
+        rec["R3_diagnosis"] = diagnosis
+    return json.loads(json.dumps(_clean(rec)))
+
+
+def compare(new, ref, path="", rtol=1e-4, atol=1e-4):
+    """Numeric leaves present in both records must agree; returns (n_checked, mismatches)."""
+    if isinstance(new, dict) and isinstance(ref, dict):
+        out = [compare(new[k], ref[k], f"{path}/{k}", rtol, atol) for k in new if k in ref and k != "meta"]
+        return sum(o[0] for o in out), [m for o in out for m in o[1]]
+    if isinstance(new, list) and isinstance(ref, list) and len(new) == len(ref):
+        out = [compare(a, b, f"{path}[{i}]", rtol, atol) for i, (a, b) in enumerate(zip(new, ref))]
+        return sum(o[0] for o in out), [m for o in out for m in o[1]]
+    if isinstance(new, (int, float)) and isinstance(ref, (int, float)) and not isinstance(new, bool):
+        return 1, ([] if np.isclose(new, ref, rtol=rtol, atol=atol) else [(path, new, ref)])
+    return 0, []
+
+
+RECORD = collect_results()
+if MODE == "full":
+    os.makedirs("runs", exist_ok=True)
+    with open("runs/results_full.json", "w") as fh:
+        json.dump(RECORD, fh, indent=1)
+    print("full-run record written to runs/results_full.json (paste it into FULL_RESULTS above)")
+if FULL_RESULTS:
+    n_checked, mismatches = compare(RECORD, FULL_RESULTS)
+    for m in mismatches[:20]:
+        print("MISMATCH", m)
+    assert not mismatches, f"{len(mismatches)} recomputed values differ from the full-run record"
+    print(f"{MODE} mode: {n_checked} recomputed values match the full-run record")
+    RES = {**FULL_RESULTS, **{k: v for k, v in RECORD.items() if k != "meta"}}
+else:
+    assert MODE == "full", "demo mode needs the pasted full-run record"
+    RES = RECORD
+
+# %% [markdown]
+# ### 4.2 Comparison table
+# Every cell gives the raw % of optimum and the normalised score $S$ (0 = random 4-turbine layout, 1 = optimal).
+# Emulator columns use the exact final state: the expected power of a post-selected 4-turbine shot, with P(optimal)
+# underneath. All emulator results are noiseless state-vector emulations, not hardware.
+
+# %%
+try:
+    from IPython.display import Markdown, display
+except ImportError:
+    Markdown, display = None, print
+
+
+def cell(pct, S):
+    return f"{pct:.2f}% (S {S:+.2f})"
+
+
+lines = ["| Rung | Exact optimum (kW) | Random layout | SA-swap, 36 runs (mean) | Rydberg A (emulator) | Rydberg B (emulator) |",
+         "|---|---|---|---|---|---|"]
+for n in RUNGS:
+    inst = RES["instances"][n]
+    sa = RES["sa"][f"{n}|SA-swap"]
+    a = RES["A"][n]["exact"]
+    a_txt = f"{cell(a['exp_pct_given_4'], a['exp_norm_given_4'])}<br>P(opt) {a['P_opt']:.3f}"
+    if n in RES.get("B", {}):
+        b = RES["B"][n]["exact"]
+        b_txt = f"{cell(b['exp_pct_given_4'], b['exp_norm_given_4'])}<br>P(opt) {b['P_opt']:.3f}"
+    else:
+        b_txt = "not run (embedding recovers the grid, ε = %.2f)" % RES["embedding"][n]["eps"]
+    rand_pct = 100 * inst["P_random"] / inst["optimum"]
+    lines.append(f"| {n} | {inst['optimum']:.2f} ({inst['n_optima']} optimal) | {cell(rand_pct, 0.0)} | "
+                 f"{cell(sa['mean_pct'], sa['mean_norm'])} | {a_txt} | {b_txt} |")
+sa_q = "; ".join(f"{n} {cell(RES['sa'][f'{n}|SA-QUBO']['mean_pct'], RES['sa'][f'{n}|SA-QUBO']['mean_norm'])}" for n in RUNGS)
+lines += ["", f"SA-QUBO (bit-flip SA on the full QUBO, λ₁ = 1.05 × 576 chosen by scan; the paper does not state λ₁): {sa_q}."]
+display(Markdown("\n".join(lines)) if Markdown else "\n".join(lines))
+
+pub = ["**Published results, R0 only** (reported numbers, not reruns; kept separate from the emulator columns above)", "",
+       "| Source | Method (platform) | Reported | Raw % | S |", "|---|---|---|---|---|"]
+vqe = [v for k, v in PUBLISHED_R0.items() if k.startswith("VQE")]
+S_of = lambda pct: float(norm_score(pct / 100 * INST["R0"]["optimum"], INST["R0"]))
+pub.append(f"| Hancock et al., Table 1 | VQE, 8 variants (Qiskit simulator) | mean of 36 runs | {min(vqe):.1f}–{max(vqe):.1f}% | "
+           f"{S_of(min(vqe)):+.2f} to {S_of(max(vqe)):+.2f} |")
+sa_pub = PUBLISHED_R0["SA, pyqubo/neal (median, read off Fig. 9)"]
+pub.append(f"| Hancock et al., Fig. 9 | SA, pyqubo/neal (classical) | median of 36 runs, read by eye | ≈{sa_pub:.1f}% | ≈{S_of(sa_pub):+.2f} |")
+pub.append("| Hancock et al., Fig. 9 | Gurobi (classical) | all 36 runs | 100% | +1.00 |")
+pub.append("| Milan group (D-Wave hardware) | — | not included: instance parameters not yet confirmed | — | — |")
+display(Markdown("\n".join(pub)) if Markdown else "\n".join(pub))
+
+# %% [markdown]
+# ### 4.3 Normalised score against rung
+
+# %%
+INK, INK2, MUTED, GRIDC, BASE = "#0b0b0b", "#52514e", "#898781", "#e1e0d9", "#c3c2b7"
+SERIES = {"Rydberg A (emulator)": ("#2a78d6", "o"), "Rydberg B (emulator)": ("#eb6834", "s"), "SA-swap (classical)": ("#1baf7a", "^")}
+rungs = list(RUNGS)
+xs = np.arange(len(rungs))
+vals = {
+    "Rydberg A (emulator)": [RES["A"][n]["exact"]["exp_norm_given_4"] for n in rungs],
+    "Rydberg B (emulator)": [RES["B"][n]["exact"]["exp_norm_given_4"] if n in RES.get("B", {}) else np.nan for n in rungs],
+    "SA-swap (classical)": [RES["sa"][f"{n}|SA-swap"]["mean_norm"] for n in rungs],
+}
+fig, ax = plt.subplots(figsize=(7.5, 4.8), facecolor="#fcfcfb")
+ax.set_facecolor("#fcfcfb")
+ax.axhline(0, color=BASE, lw=1.5, zorder=1)
+ax.text(0.55, 0.03, "random layout (S = 0)", color=MUTED, fontsize=9, va="bottom")
+lo, hi = S_of(min(vqe)), S_of(max(vqe))
+ax.add_patch(plt.Rectangle((-0.42, lo), 0.16, hi - lo, facecolor="none", edgecolor=INK2, hatch="////", lw=1, zorder=2))
+ax.text(-0.22, (lo + hi) / 2, "published VQE means\n(simulator, R0 only)", color=INK2, fontsize=8, va="center")
+for label, ys in vals.items():
+    color, marker = SERIES[label]
+    ax.plot(xs, ys, color=color, lw=2, marker=marker, ms=8, mec="#fcfcfb", mew=2, zorder=3, label=label)
+    last = max(i for i, v in enumerate(ys) if np.isfinite(v))
+    ax.text(xs[last] + 0.08, ys[last], label.split(" (")[0], color=INK2, fontsize=9, va="center")
+ax.set_xticks(xs, [f"{n}\nx={RUNGS[n][0]}, r={RUNGS[n][1]:g}\n{RUNGS[n][2]}" for n in rungs], color=INK2, fontsize=9)
+ax.set_xlim(-0.6, len(rungs) - 1 + 1.1)
+ax.set_ylim(min(-0.5, lo - 0.25), 1.08)
+ax.set_ylabel("S of a post-selected 4-turbine layout\n(0 = random, 1 = optimal)", color=INK2, fontsize=9)
+ax.tick_params(colors=MUTED, labelsize=9)
+ax.grid(axis="y", color=GRIDC, lw=0.8)
+ax.set_axisbelow(True)
+for side in ("top", "right"):
+    ax.spines[side].set_visible(False)
+for side in ("left", "bottom"):
+    ax.spines[side].set_color(BASE)
+ax.legend(loc="upper center", bbox_to_anchor=(0.5, -0.2), ncol=3, frameon=False, fontsize=9, labelcolor=INK2)
+ax.set_title("Solution quality as wake physics departs from the Rydberg Hamiltonian", color=INK, fontsize=11, loc="left")
+plt.tight_layout()
+plt.show()
+
+# Phase 4 exit: every rung has exact, random, SA-swap and Encoding A entries; B on R1-R3.
+assert all(n in RES["A"] and f"{n}|SA-swap" in RES["sa"] for n in RUNGS)
+assert all(n in RES["B"] for n in ("R1", "R2", "R3"))
+
+# %% [markdown]
 # ## 5. Limitations
 # *(Phase 5.)*
 
