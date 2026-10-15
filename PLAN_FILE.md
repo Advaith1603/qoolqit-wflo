@@ -2,9 +2,32 @@
 
 Oct 2, 2026 · @Advaith
 
+## Status (as of 15 Oct 2026)
+
+All numbers below are from the JSON results record in `wflo_rydberg.ipynb` (Phase 0 timings from the benchmark run).
+
+- **Phase 0 — passed.** emu-sv 2.9.1, 16 atoms, 500 shots: 8.8 s on GPU, 33 s on CPU (QuTiP 60 s); QuTiP vs emu-sv exact P(optimal) agree to 4e-5.
+- **Phase 1 — passed.** Oracle values asserted (576; 83.728 and 17.582; R0 2304.00 with 79 optima = king-graph MIS); R1 2229.38 (1 optimum), R2 2304.00 (79), R3 2242.71 (2).
+- **Phase 2 — passed (G2, Tier 1 banked).** Δ_f = 0.10 (Ω = 1.7⁻⁶ ≈ 0.0414, Δ from −0.10, T = device maximum 332.4); R0 exact P(optimal) 0.696, P(4) 0.733; selection rule 36/36 optimal.
+- **Phase 3 — passed (G3).** Encoding B compiles and runs on R1–R3 (ε 0.55 / 0.47 / 0.47); B matches A on R1 (P(optimal) 0.317 vs 0.320), is worse on R2 (0.337 vs 0.696), and neither reaches the R3 optimum.
+- **Phase 4 — passed (G4).** Comparison table and S-vs-rung plot in the notebook; demo mode on CPU reproduces 296 values of the full-run record.
+- **Phase 4b — dropped.** `LocalEmulator` cannot sample above 24 atoms (torch.multinomial 2²⁴ cap) and a 25-atom run took about 22 min.
+- **Phase 5 — pending.**
+
+## Remaining work (in order)
+
+1. R3 narrative in the notebook conclusion: every scalable encoding (A, B, lattice) misranks the optimum (encoding failure); the one encoding that ranks it well (ranking-aware fit, non-scalable) then fails on finite-time dynamics; both bottlenecks bind.
+2. Like-for-like published comparison: show our selection-rule result on R0 (36/36 optimal, S = 1.00) next to the published VQE/SA numbers; keep expected S for emulator-only comparisons and label which statistic each column is.
+3. Uncertainty: published SA as S ≈ −0.9 ± 0.2 (read from the figure, ±1% reading error); the anisotropic lattice as a plateau (a_y/a_x 0.25–0.42, τ-b flat) with the S range across it, not a single tuned value.
+4. Remove the D-Wave column; one prose sentence citing the Milan headline, with the caveat that "at most 3% lower power" cannot be interpreted without that instance's random baseline (on R0 a random layout is already only about 5% below optimum).
+5. Hardware-realism check: R0 and R1 with Encoding A under Pulser SPAM/readout noise at stated realistic values (dephasing only if cheap); P(optimal), S and the selection-rule result next to the noiseless values.
+6. Notebook section "Proposed QPU experiment": R0 and R1 with Encoding A on Pasqal hardware (one program, scored for both rungs), shot budget, and what each result would establish (emulator-vs-QPU gap on a native instance; whether the van der Waals tail effect on R1 survives).
+7. Phase 5: limitations, header polish, JSON record and demo-check updates for the new results, clean-environment test in `/tmp/judge-env` (`uv venv /tmp/judge-env --python 3.11 --seed`, own kernel).
+8. Two-slide deck draft as a separate PPTX, then stop for review.
+
 ## Overview
 
-Question: how much turbine power does a Rydberg-atom solver lose as wind-farm wake physics departs from the Rydberg Hamiltonian, and how does that compare with D-Wave, QAOA, VQE and simulated annealing on the same instances? Deadline 18 Oct 2026, 23:59 CEST; budget about 27 working hours.
+Question: how much turbine power does a Rydberg-atom solver lose as wind-farm wake physics departs from the Rydberg Hamiltonian, and how does that compare with exact enumeration, simulated annealing and the published VQE/SA results (D-Wave cited in prose only)? Deadline 18 Oct 2026, 23:59 CEST; budget about 27 working hours.
 
 **Tier 2 (main track):** a ladder of 4×4 WFLO instances, from Rydberg-native to fully non-native, each solved with two encodings (native blockade and embedded QUBO) and compared with exact enumeration, simulated annealing and published quantum results.
 
@@ -12,10 +35,10 @@ Question: how much turbine power does a Rydberg-atom solver lose as wind-farm wa
 
 **Claim boundaries:**
 
-- Emulator results only; published D-Wave numbers are hardware and are labelled as such, never pooled with emulator numbers.
+- Emulator results only; published D-Wave numbers are hardware results, cited in prose only and never placed in a table with emulator numbers.
 - The published instance is easy and Rydberg-native; a good result there is presented as a structural observation, not as quantum advantage.
 - No speed claims: emulation time measures the classical simulator, not the device.
-- 4×4 grids (16 atoms) are the core; 5×5 (25 atoms, on the remote GPU) is a gated extension (Phase 4b).
+- 4×4 grids (16 atoms) are the core; 5×5 (25 atoms) was a gated extension (Phase 4b) and has been dropped.
 
 ## Positioning
 
@@ -30,12 +53,18 @@ WFLO has been solved on D-Wave, QAOA and simulated VQE, but no published neutral
 
 **Finding from rebuilding the Plymouth QUBO** ([their code](https://github.com/jamesshancock/WindfarmLayoutOptimization)): the wake terms couple only nearest neighbours (83.7) and diagonal neighbours (17.6), identically in every direction, and nothing beyond. All 79 optimal layouts are exactly the 79 independent 4-sets of the 4×4 king graph, the graph family used in Ebadi et al. 2022. The Q matrix is dense only because of the turbine-count penalty; without that penalty the optimum fills all 16 sites.
 
-| Rung | Wake | Wind | Max anisotropy | Optimum is king-graph MIS? |
-| --- | --- | --- | --- | --- |
-| R0 (published) | x = 1, r = 1.5 | Uniform, 36 directions | 0% | Yes, 79 optima |
-| R1 | x = 3, r = 1 | Uniform | 11% | Yes, unique optimum |
-| R2 | x = 1, r = 1.5 | 75% from west | 83% | Yes |
-| R3 | x = 3, r = 1 | 75% from west | 99% | No |
+| Rung | Wake | Wind | Max anisotropy* | Optimum (kW) | Optimum is king-graph MIS? |
+| --- | --- | --- | --- | --- | --- |
+| R0 (published) | x = 1, r = 1.5 | Uniform, 36 directions | 0% | 2304.00 | Yes, 79 optima |
+| R1 | x = 3, r = 1 | Uniform | 11% | 2229.38 | Yes, unique optimum (four corners) |
+| R2 | x = 1, r = 1.5 | 75% from west | 83% | 2304.00 | Yes, the same 79 optima as R0 |
+| R3 | x = 3, r = 1 | 75% from west | 99% | 2242.71 | No: 2 optima (both diagonals) |
+
+R1–R3 are our own instances. "75% from west" is our definition: probability 0.75 from 0°, the remaining 0.25 spread evenly over the other 35 directions.
+
+**Wake rule.** The paper underspecifies which cells lie in a wake. One rule builds every rung: j is in the wake of i iff 0.001 < s ≤ x + 0.001 and t < r·s − 10⁻⁹ (cells exactly on the cone edge are outside). The notebook asserts that it gives exactly the same W as a bare `t < r·s` on R0 and R2, so it reproduces the published instance; the margin only changes the r = 1 rungs (R1, R3), where a bare floating-point test is rounding-dependent and broke mirror symmetry. The earlier expected values R1 2228.6 and R3 2238.8 (unique) were artifacts of that rounding.
+
+\* The max-anisotropy figures are from the original plan and were not recomputed; under the adopted rule R1's W is fully symmetric under the grid's symmetries (uniform wind), so its 11% should be re-checked.
 
 The contribution is the curve across this ladder: native at R0, increasingly mismatched at R1–R3 (long range, wrong decay rate, then direction-dependent).
 
@@ -45,8 +74,8 @@ Exit: a 16-atom QuantumProgram on a 4×4 square register compiles and returns bi
 
 1. Fresh venv; pip install qoolqit; pin versions in requirements.txt immediately.
 2. Run the Register → Drive → QuantumProgram → compile → run tutorial unmodified.
-3. Read the QUBO tooling docs: QUBOInstance, AdiabaticDriveShaper, and whether an embedder (QUBO → atom positions) ships with it.
-4. On the remote machine, time a 16-atom run (CPU) and a 25-atom run (GPU) at 500 shots. These numbers set the Phase 4 sweep size and Gate G4b.
+3. Read the QUBO tooling docs: QUBOInstance, AdiabaticDriveShaper, and whether an embedder (QUBO → atom positions) ships with it. **Result:** QUBOInstance and AdiabaticDriveShaper are not in qoolqit 1.4.0; it ships `InteractionEmbedder` and `Blade`.
+4. On the remote machine, time a 16-atom run (CPU) and a 25-atom run (GPU) at 500 shots. These numbers set the Phase 4 sweep size and Gate G4b. **Result:** emu-sv is the backend for both modes (CPU in demo, GPU in full); QuTiP is used only for the one-time cross-check; complex64 is not available (emu-sv 2.9.1 hard-codes complex128).
 
 | Failure | Detection | Fix / alternative |
 | --- | --- | --- |
@@ -61,10 +90,10 @@ Exit: a 16-atom QuantumProgram on a 4×4 square register compiles and returns bi
 
 Exit: Q matrices for R0–R3 saved, each with its exact optimum, full optimum set, and an SA baseline over 36 runs.
 
-1. Reimplement the QUBO from the paper's equations (the Plymouth repo has no license, so its code is not copied). Use their repo only as a test oracle: assert per-turbine power 576, penalty 83.728 at distance 1 and 17.582 at √2, zero beyond, R0 optimum 2304.0 kW with exactly 79 optima.
+1. Reimplement the QUBO from the paper's equations (the Plymouth repo has no license, so its code is not copied). Use their repo only as a test oracle: assert per-turbine power 576, penalty 83.728 at distance 1 and 17.582 at √2, zero beyond, R0 optimum 2304.0 kW with exactly 79 optima. Wake membership uses the single edge-margin rule described under Positioning.
 2. Build R1–R3 by changing only x, r and the wind regime (table in Positioning). Keep m = 4.
 3. Exact optimum by enumeration over all 1,820 four-turbine layouts (instant). This replaces Gurobi; Gurobi needs a licence and adds nothing at this size.
-4. SA: your own numpy implementation (fewer dependencies), 36 runs, the same protocol as the paper.
+4. SA: your own numpy implementation (fewer dependencies), 36 runs. **As built:** the classical reference is SA-swap (exactly 4 turbines, each move relocates one); bit-flip SA on the full QUBO (SA-QUBO, λ₁ = 1.05 × 576 chosen by scan; the paper does not state λ₁) is a footnote only. Neither reproduces the paper's SA (median ≈ 90% of optimum read off their Fig. 9).
 5. Store per rung: wake matrix W (pairwise penalties only), per-site power, optimum set.
 
 | Failure | Detection | Fix / alternative |
@@ -81,9 +110,10 @@ Exit: on R0, the emulator returns an optimal 4-turbine layout (2304.0 kW) as its
 
 1. Register.from\_coordinates on the grid; check min\_distance against the device limit.
 2. Drive: amplitude ramp up, hold, down; global detuning swept from negative to positive (the standard MIS adiabatic schedule).
-3. Compute R\_b from the final Ω and Δ and assert √2·a < R\_b < 2·a.
-4. Run 500 shots. Per run, take the most frequent bitstring with exactly 4 turbines and no adjacency, matching the paper's selection rule. Score it with the Plymouth Energy() function.
-5. Repeat 36 runs with different sampling seeds; report mean % of optimum and P(optimal shot).
+3. Compute R\_b from Ω (R\_b = Ω^(−1/6)) and assert √2·a < R\_b < 2·a.
+4. Selection rule (the paper's): per run, take the most probable bitstring with exactly 4 turbines, with no adjacency condition. Score it with the power function.
+5. Primary metrics come from the exact final state: P(optimal), P(optimal | 4) and the expected normalised score S of a post-selected 4-turbine shot. The 36 × 500 resampling is used only to reproduce the selection rule; its spread is shot noise, not comparable to the paper's optimiser variance.
+6. Tuning rule: no objective may use the optimum. Schedules are chosen by P(exactly 4 turbines); on R0 this gives Δ_f = 0.10, frozen for every rung (a 3 × 3 Ω × Δ_f check confirmed the choice).
 
 | Failure | Detection | Fix / alternative |
 | --- | --- | --- |
@@ -106,8 +136,9 @@ Exit: for R1–R3, atom positions whose Rydberg interactions reproduce the wake 
 \epsilon = \frac{\lVert U(r) - sW \rVert_F}{\lVert sW \rVert_F}, \qquad U_{ij}(r) = \frac{C_6}{\lvert r_i - r_j \rvert^6}
 ```
 
-1. Use QoolQit's embedder if Phase 0 found one; otherwise scipy.optimize over 32 coordinates + s, with 20 random restarts plus one start from the grid.
-2. Report ε per rung. Expect it to grow from R1 to R3: wake penalties decay \~2× per lattice step where C6/r^6 decays 64×, and R2–R3 are direction-dependent while van der Waals is not.
+1. **As built:** our own L-BFGS fit over 32 coordinates with the scale s in closed form, minimum-spacing and maximum-radius penalties, 20 random restarts plus one start from the grid. QoolQit's `InteractionEmbedder` is a baseline only (QUBOInstance / AdiabaticDriveShaper are not in qoolqit 1.4.0).
+2. Report ε per rung. Expect it to grow from R1 to R3: wake penalties decay \~2× per lattice step where C6/r^6 decays 64×, and R2–R3 are direction-dependent while van der Waals is not. **Result:** ε did not grow (R1 0.55, R2 0.47, R3 0.47; `InteractionEmbedder` 0.77–0.88) and does not predict solution quality. The energy-ranking metrics do: Kendall τ-b over the lowest-energy 5% of layouts, and the optimum's rank under the programmed energy (R3: rank 355 under both A and B).
+4. Per-rung schedules for B: Ω × Δ_f grid selected only by P(exactly 4 turbines).
 3. Also run Encoding A (grid + blockade, long-range wake ignored) on every rung. A vs B on the same rung is the core comparison.
 
 | Failure | Detection | Fix / alternative |
@@ -125,35 +156,41 @@ Exit: the comparison table filled for every rung reached, plus one plot of % of 
 
 | Metric | Definition | Why |
 | --- | --- | --- |
-| Power, % of optimum | Selected layout (most frequent valid 4-turbine bitstring) scored by the Plymouth Energy(), over 36 runs | Same figure of merit as the published VQE table |
-| P(optimal shot) | Fraction of shots that are an optimal layout | Distribution quality, not one lucky selection |
-| Valid-shot rate | Shots with exactly 4 turbines | Cost of dropping the count penalty |
-| Embedding error ε | Phase 3 definition | Explains the degradation, rung by rung |
+| P(optimal), P(optimal \| 4) | From the exact final state | Primary metrics, no sampling noise |
+| Normalised score S | (P − P_random) / (P_opt − P_random), with P_random the mean power over all 1,820 four-turbine layouts of that rung | Raw % flatters: a random layout already scores 90.58–94.95% of optimum |
+| Expected S of a post-selected 4-turbine shot | Exact final state | Emulator-only comparisons |
+| Selection-rule result | Most probable 4-turbine layout per run, 36 × 500 resampling | Like-for-like with the published VQE; spread is shot noise |
+| P(exactly 4) | Exact final state | Tuning objective; cost of dropping the count penalty |
+| ε and energy ranking | Phase 3 definitions; Kendall τ-b over the lowest 5%, optimum rank | Explain the degradation, rung by rung |
 | Wall clock | Per run | Reported for completeness, never as a speed claim |
 
-**Comparison table to fill** (emulator and hardware kept in separate columns):
+**Comparison table (current, from the notebook's JSON record).** Cells give raw % of optimum and S; Rydberg columns are noiseless emulation, exact final state, expected value for a post-selected 4-turbine shot, with P(optimal) and the selection-rule result (36 × 500).
 
-| Rung | Exact (kW) | SA | Rydberg A | Rydberg B | VQE (published, simulator) | D-Wave (published, hardware) |
+| Rung | Exact (kW) | Random layout | SA-swap (36 runs) | Rydberg A | Rydberg B | VQE (published, simulator) |
 | --- | --- | --- | --- | --- | --- | --- |
-| R0 | 2304.0 |  |  |  | 93.3–95.5% | Pending Milan paper |
-| R1 | 2228.6 |  |  |  | n/a | n/a |
-| R2 | 2304.0 |  |  |  | n/a | n/a |
-| R3 | 2238.8 |  |  |  | n/a | n/a |
+| R0 | 2304.00 (79 optima) | 94.95% (S 0) | 100.00% (S +1.00), 36/36 | 99.96% (S +0.99); P(opt) 0.696; 36/36 | not run (embedding recovers the grid, ε 0.07) | 93.3–95.5% (S −0.33 to +0.11) |
+| R1 | 2229.38 (1) | 90.58% (S 0) | 100.00% (S +1.00), 36/36 | 98.99% (S +0.89); P(opt) 0.320; 36/36 | 98.97% (S +0.89); P(opt) 0.317; 36/36 | n/a |
+| R2 | 2304.00 (79) | 93.76% (S 0) | 99.92% (S +0.99), 33/36 | 99.86% (S +0.98); P(opt) 0.696; 36/36 | 99.04% (S +0.85); P(opt) 0.337; 36/36 | n/a |
+| R3 | 2242.71 (2) | 92.07% (S 0) | 100.00% (S +1.00), 36/36 | 98.39% (S +0.80); P(opt) 0.000; 0/36 | 97.02% (S +0.62); P(opt) 0.0005; 0/36 | n/a |
 
-Published quantum baselines exist only for R0 (and for the Milan instances, if their parameters can be rebuilt). For R1–R3 the reference is exact plus SA. Optional, only if ahead of schedule: a numpy state-vector QAOA (p ≤ 3) on all rungs as a same-class gate-model reference.
+Footnotes: SA-QUBO R0 99.81% (S +0.96), R1 96.77% (+0.66), R2 99.82% (+0.97), R3 98.29% (+0.78). Published SA on R0: median ≈ 90.3% (S ≈ −0.93, read off Fig. 9). R3 probes: anisotropic lattice (a_y/a_x = 0.25) 91.35% (S −0.09), ranking-aware fit (non-scalable) 90.63% (S −0.18), P(optimal) ≤ 0.0004.
+
+The Milan group report D-Wave solutions at most 3% below Gurobi's power on their own instances; without that instance's random baseline this cannot be placed on the S scale (on R0 a random layout is already only 5.05% below optimum). No D-Wave column.
+
+Published quantum baselines exist only for R0. For R1–R3 the reference is exact plus SA-swap. Optional, only if ahead of schedule: a numpy state-vector QAOA (p ≤ 3) on all rungs as a same-class gate-model reference.
 
 | Failure | Detection | Fix / alternative |
 | --- | --- | --- |
 | Sweep will not fit the remaining time | Phase 0 timing × runs | Cut to 12 runs per cell, then drop R2 (the short-range control) before R1 or R3 |
 | Both encodings collapse on R3 | Near-random % of optimum | Report it with ε and the energy gaps; it is the negative end of the curve |
 | Results noisy across runs | Wide spread | Report median and IQR, as box plots like the paper |
-| Milan parameters not recoverable | Paper unread or unspecified | Drop that column; cite their headline numbers in prose only |
+| Milan parameters not recoverable | Paper unread or unspecified | Drop that column; cite their headline numbers in prose only (applied) |
 
 ### Phase 4b — 5×5 extension (optional, 2–3 h)
 
 Exit: the same ladder at 25 atoms, Encoding A on every rung and Encoding B where it worked at 4×4, with exact optima, so the degradation curve has a second system size.
 
-Hardware: shared remote machine, Ubuntu 20.04, 2× Xeon Silver 4314 (32 cores, 64 threads), 251 GB RAM (\~173 GB free at last check), RTX 5000 Ada 32 GB (driver 580). Ada cards are slow at FP64, so prefer complex64 on the GPU or compare against the CPU; cap jobs at 16–24 workers because the box is shared. A 25-atom state vector is \~512 MB (complex128), so it fits on the GPU with solver workspace. 30 atoms (16 GB per vector) is the practical ceiling and not planned; 36 atoms cannot be emulated exactly.
+Hardware: shared remote machine, Ubuntu 20.04, 2× Xeon Silver 4314 (32 cores, 64 threads), 251 GB RAM (\~173 GB free at last check), RTX 5000 Ada 32 GB (driver 580). Ada cards are slow at FP64, but complex64 is not available (emu-sv 2.9.1 hard-codes complex128); cap jobs at 16–24 workers because the box is shared. A 25-atom state vector is \~512 MB (complex128), so it fits on the GPU with solver workspace. 30 atoms (16 GB per vector) is the practical ceiling and not planned; 36 atoms cannot be emulated exactly.
 
 1. Rebuild R0–R3 with len\_grid = 5 and m = 9, the maximum independent set size of the 5×5 king graph. Assert that the R0 optimum is the king-graph MIS.
 2. Exact optimum by enumeration over all 2,042,975 nine-turbine layouts, parallelised across up to 24 cores (minutes).
@@ -166,7 +203,7 @@ Hardware: shared remote machine, Ubuntu 20.04, 2× Xeon Silver 4314 (32 cores, 6
 | Enumeration too slow | Over 30 min per rung | Exact ILP (PuLP + CBC) on the QUBO, or numba-compiled enumeration |
 | Embedding 50 coordinates converges poorly | Large ε or wide spread over restarts | Warm-start from the 4×4 solution tiled onto the larger grid; fewer, longer restarts |
 
-**Gate G4b (hour 21):** start only if Tier 1 is banked, the 4×4 table has R0, R1 and R3 filled for Encoding A, and a 25-atom run takes under 5 minutes. Otherwise skip and list 5×5 under limitations. The judges' demo notebook stays at 4×4; 5×5 results load from CSV.
+**Gate G4b (hour 21):** start only if Tier 1 is banked, the 4×4 table has R0, R1 and R3 filled for Encoding A, and a 25-atom run takes under 5 minutes. Otherwise skip and list 5×5 under limitations. **Outcome: failed, Phase 4b dropped** — `LocalEmulator` cannot sample above 24 atoms and a 25-atom run took about 22 min.
 
 ## Tier 1 fallback
 
@@ -183,9 +220,9 @@ Intermediate outcomes are fine to ship as they stand: Tier 1 plus any subset of 
 
 ## Phase 5 — Notebook and two-slide deck (2–3 h)
 
-Exit: the notebook runs top to bottom in a fresh environment in under \~15 minutes (reduced default sweep, full results loaded from CSV), and the deck is two slides.
+Exit: the notebook runs top to bottom in a fresh environment in under \~15 minutes (reduced default sweep, full results from the JSON literal in the notebook), and the deck is two slides.
 
-**Self-contained notebook rules:** one pinned install cell at the top; a MODE flag (demo by default: R0 at 4×4 on CPU in under 15 minutes; full: the remote-machine sweep); no external files, with final full-run results pasted into a cell as a JSON literal and demo mode checking its recomputed subset against them; GPU auto-detected, CPU fallback; seeds and versions printed first. Develop in a private git repo with jupytext pairing and nbstripout; the .ipynb alone is the deliverable.
+**Self-contained notebook rules:** one pinned install cell at the top; a MODE flag (demo by default: R0 at 4×4 on CPU in under 15 minutes; full: the remote-machine sweep); no external files, with final full-run results pasted into a cell as a JSON literal and demo mode checking its recomputed subset against them; GPU auto-detected, CPU fallback; seeds and versions printed first. Develop in a private git repo with jupytext pairing and nbstripout; the .ipynb alone is the deliverable. CSV is used only for incremental output of full runs (`runs/results_full.csv`); long runs are launched with `setsid nohup` (tmux is not installed on the remote machine).
 
 1. Header: QoolQit and Python versions, the question, claim boundaries.
 2. Instances: the Plymouth QUBO builder, the R0–R3 ladder, and the king-graph check (79 optima = 79 independent 4-sets).
@@ -199,7 +236,7 @@ Slide 1: problem → the ladder → the degradation plot → why it matters (lay
 | Failure | Detection | Fix / alternative |
 | --- | --- | --- |
 | Fails in a clean environment | Fresh venv or Colab test | Pin everything in the install cell; no imports beyond qoolqit, numpy, scipy, matplotlib |
-| Too slow for a judge to rerun | Over 15 min | Demo flag runs R0 with 100 shots; full sweep from saved CSV |
+| Too slow for a judge to rerun | Over 15 min | Demo mode recomputes R0 and the emulation-free results (6.5 min on CPU) and reads the rest from the JSON literal |
 | Deck overflows | Count | One plot per slide; detail lives in the notebook |
 
 ## Schedule and gates
