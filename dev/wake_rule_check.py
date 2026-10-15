@@ -1,8 +1,9 @@
 """Phase 1 probe: wake QUBO reimplemented from Hancock et al. arXiv:2312.13123, Eqs. (3)-(5).
 
 Not derived from the Plymouth code. The paper does not state the wake-membership rule precisely;
-the rule below was chosen as the one (of the variants scanned) that reproduces all oracle values:
-  site j is in the wake of i for wind d  iff  0.001 < s <= x + 0.001  and  t < r * s,
+the rule below reproduces the published R0 values and is symmetric under the grid's mirror symmetries:
+  site j is in the wake of i for wind d  iff  0.001 < s <= x + 0.001  and  t < r * s - 1e-9,
+  (cells exactly on the cone edge are outside; a bare `t < r * s` is rounding-dependent and breaks mirror symmetry)
   with s, t the downstream / lateral offsets of j's centre from i's centre.
 Wind angle is counted clockwise from west (row index grows southwards).
 "75% from west" = p(0 deg) = 0.75, remaining 0.25 spread evenly over the other 35 directions.
@@ -28,7 +29,7 @@ def wake_matrix(L, x, r, kind):
         for i, j in itertools.permutations(range(L * L), 2):
             dv = rc[j] - rc[i]
             s, t = dv @ e, abs(dv[0] * e[1] - dv[1] * e[0])
-            if TOL < s <= x + TOL and t < r * s:
+            if TOL < s <= x + TOL and t < r * s - 1e-9:
                 u = V * (1 - 2 * A_IND / (1 + aT * (np.hypot(*dv) / r) ** 2) ** 2)
                 W[i, j] += pd * (V**3 - u**3) / 3
     return W + W.T  # symmetric pairwise penalty for an unordered pair
@@ -46,8 +47,8 @@ if __name__ == "__main__":
     assert np.isclose(V**3 / 3, 576)
     assert np.isclose(W0[0, 1], 83.728, atol=1e-3) and np.isclose(W0[0, 5], 17.582, atol=1e-3)
     assert W0[0, [2, 3, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15]].max() == 0
-    rungs = {"R0": (1, 1.5, "uniform", 2304.0), "R1": (3, 1, "uniform", 2228.6),
-             "R2": (1, 1.5, "west75", 2304.0), "R3": (3, 1, "west75", 2238.8)}
+    rungs = {"R0": (1, 1.5, "uniform", 2304.0), "R1": (3, 1, "uniform", 2229.4),
+             "R2": (1, 1.5, "west75", 2304.0), "R3": (3, 1, "west75", 2242.7)}
     for name, (x, r, kind, target) in rungs.items():
         best, sets = optimum(wake_matrix(4, x, r, kind), 4)
         print(name, round(best, 2), len(sets), sets[0])

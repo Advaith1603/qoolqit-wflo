@@ -92,14 +92,20 @@ assert all(_installed(p) == v for p, v in PINNED.items()), "pinned versions not 
 # (linear superposition of wakes).
 #
 # **Wake membership.** The paper underspecifies which cells lie in a wake ("if a grid location is at all within the
-# wake, it is entirely within its wake"). We adopt the rule that reproduces the published optimum set: with $s$ and
+# wake, it is entirely within its wake"). We adopt a rule that reproduces the published R0 optimum set: with $s$ and
 # $t$ the downstream and lateral offsets of $j$'s centre from $i$'s, $j$ is in the wake iff
-# $0.001 < s \le x + 0.001$ and $t < r\,s$. Wind angles are counted clockwise from west (wind from 0° blows east;
-# rows grow southwards).
+# $0.001 < s \le x + 0.001$ and $t < r\,s - 10^{-9}$ (cells exactly on the cone edge are outside). Wind angles are
+# counted clockwise from west (wind from 0° blows east; rows grow southwards).
+#
+# The explicit margin on the cone edge matters for $r = 1$ (R1, R3): there the edge is at 45°, and diagonal neighbours
+# lie exactly on it for some wind directions. A bare floating-point test `t < r*s` then includes or excludes them
+# depending on rounding (e.g. $\cos 90° \approx 6 \times 10^{-17}$), which breaks the grid's mirror symmetry by up to
+# 4.2 kW. With the margin, every wake matrix is invariant under the symmetries of its wind regime (asserted below).
 
 # %%
 A_IND, R_T, V_WIND = 0.1, 0.33, 12.0      # axial induction, turbine radius (grid units), wind speed (m/s)
 TOL = 1e-3
+EDGE_EPS = 1e-9                            # cells exactly on the cone edge are outside the wake
 P_TURBINE = V_WIND**3 / 3                  # 576 per turbine
 
 
@@ -131,7 +137,7 @@ def wake_matrix(L, x, r, regime):
         for i, j in itertools.permutations(range(L * L), 2):
             dv = rc[j] - rc[i]
             s, t = dv @ e, abs(dv[0] * e[1] - dv[1] * e[0])
-            if TOL < s <= x + TOL and t < r * s:
+            if TOL < s <= x + TOL and t < r * s - EDGE_EPS:
                 u = V_WIND * (1 - 2 * A_IND / (1 + alpha_t * (np.hypot(*dv) / r) ** 2) ** 2)
                 W[i, j] += p_d * (V_WIND**3 - u**3) / 3
     return W + W.T
@@ -197,7 +203,8 @@ for name, d in INST.items():
 # %% [markdown]
 # ### 1.3 Oracle assertions
 # Published values for R0: per-turbine power 576, pairwise penalty 83.728 at distance 1 and 17.582 at $\sqrt2$, zero
-# beyond, optimum 2304.0 kW. Expected optima for our rungs: R1 2228.6 (unique), R2 2304.0, R3 2238.8 (not a king-graph MIS).
+# beyond, optimum 2304.0 kW. Our rungs (with the symmetric edge rule): R1 2229.38 (unique), R2 2304.0 (same 79 optima as
+# R0), R3 2242.71 with two mirror-image optima (the diagonal and the anti-diagonal), neither a king-graph MIS.
 
 # %%
 def king_adjacent(a, b, L=L_GRID):
@@ -216,10 +223,23 @@ king_mis4 = {c for c in itertools.combinations(range(16), 4)
 opt_sets = lambda name: {tuple(np.flatnonzero(BITS[k])) for k in INST[name]["opt_idx"]}
 assert INST["R0"]["optimum"] == 2304.0 and opt_sets("R0") == king_mis4 and len(king_mis4) == 79
 
-for name, target, n_opt in [("R1", 2228.6, 1), ("R2", 2304.0, None), ("R3", 2238.8, 1)]:
-    assert round(INST[name]["optimum"], 1) == target, name
-    assert n_opt is None or len(INST[name]["opt_idx"]) == n_opt, name
-assert not opt_sets("R3") <= king_mis4                     # R3's optimum is not a king-graph MIS
+for name, target, n_opt in [("R1", 2229.38, 1), ("R2", 2304.0, 79), ("R3", 2242.71, 2)]:
+    assert round(INST[name]["optimum"], 2) == target, name
+    assert len(INST[name]["opt_idx"]) == n_opt, name
+assert opt_sets("R3") == {(0, 5, 10, 15), (3, 6, 9, 12)}   # the two diagonals
+assert not opt_sets("R3") & king_mis4                      # R3's optima are not king-graph MIS
+
+# Symmetry: uniform-wind rungs are invariant under all 8 grid symmetries, west-wind rungs under the north-south mirror.
+_rc = site_coords(L_GRID).astype(int)
+_perm = lambda f: np.array([f(rr, cc)[0] * L_GRID + f(rr, cc)[1] for rr, cc in _rc])
+MIRROR_NS = _perm(lambda rr, cc: (L_GRID - 1 - rr, cc))
+D4 = [_perm(f) for f in (lambda rr, cc: (rr, cc), lambda rr, cc: (cc, L_GRID - 1 - rr),
+                         lambda rr, cc: (L_GRID - 1 - rr, L_GRID - 1 - cc), lambda rr, cc: (L_GRID - 1 - cc, rr),
+                         lambda rr, cc: (L_GRID - 1 - rr, cc), lambda rr, cc: (rr, L_GRID - 1 - cc),
+                         lambda rr, cc: (cc, rr), lambda rr, cc: (L_GRID - 1 - cc, L_GRID - 1 - rr))]
+for name, d in INST.items():
+    for g in (D4 if d["regime"] == "uniform" else [MIRROR_NS]):
+        assert np.allclose(d["W"], d["W"][np.ix_(g, g)], atol=1e-9), name
 assert opt_sets("R1") <= king_mis4 and opt_sets("R2") <= king_mis4
 assert np.argmax(INST["R0"]["power_all"]) == 2**16 - 1     # without the count penalty, the optimum fills all 16 sites
 print("R0 = MIS on the 4x4 king graph: the 79 optimal layouts are exactly its 79 independent 4-sets")
@@ -638,7 +658,7 @@ for name in RUNGS:
     radial = np.linalg.norm(pos - pos.mean(0), axis=1).max()
     ie = InteractionEmbedder().embed(W / W.max())
     pos_ie = np.array([ie.coords[k] for k in sorted(ie.coords)])
-    embedding[name] = dict(pos=pos, eps_restarts=eps_all, radial=radial, ours=embed_metrics(pos, W),
+    embedding[name] = dict(pos=pos, pos_ie=pos_ie, eps_restarts=eps_all, radial=radial, ours=embed_metrics(pos, W),
                            interaction_embedder=embed_metrics(pos_ie, W),
                            ie_min_distance=float(np.linalg.norm(pos_ie[:, None] - pos_ie[None], axis=-1)[IU].min()))
     e, b = embedding[name]["ours"], embedding[name]["interaction_embedder"]
@@ -666,72 +686,221 @@ plt.tight_layout()
 plt.show()
 
 # %% [markdown]
-# **Encoding B programs.** Same pulse shape as Encoding A ($\Omega = 1.7^{-6}$, $\Delta_0 = -0.10$, $T = T_{\max}$).
-# The per-rung tuning is a scan of $\Delta_f$ selected **only** by P(exactly $m$ excitations), which needs no ground
-# truth. Emulated in full mode (R1–R3); demo mode does not run Encoding B.
-
-# %%
-DELTA_SCAN_B = [0.02, 0.03, 0.04, 0.06, 0.10, 0.15, 0.2, 0.3, 0.45, 0.7, 1.0]
-results_B = {}
-if MODE == "full":
-    for name in ("R1", "R2", "R3"):
-        reg_B = Register.from_coordinates([tuple(map(float, p)) for p in embedding[name]["pos"]])
-        assert reg_B.min_distance() >= D_MIN - 1e-9
-        tune = {}
-        for df in DELTA_SCAN_B:
-            pr, wall = final_probs(reg_B, adiabatic_drive(df, DELTA_0_A, OMEGA_A))
-            tune[df] = (exact_metrics(pr, INST[name]), pr)
-        df_best = max(tune, key=lambda df: tune[df][0]["P4"])
-        results_B[name] = dict(delta_f=df_best, scan={df: m for df, (m, _) in tune.items()},
-                               exact=tune[df_best][0], resampled=resample_selection(tune[df_best][1], INST[name]))
-        print(name, "Delta_f scan, P(4):", {df: round(m["P4"], 3) for df, (m, _) in tune.items()}, "-> chosen", df_best)
-
-    print("\nrung enc  P(opt)  P(opt|4)  P(4)   E[S|4]  mode-of-4 %(S)        36x500 selected optimal")
-    for name in ("R1", "R2", "R3"):
-        for enc, res in (("A", results_A[name]), ("B", results_B[name])):
-            e, r = res["exact"], res["resampled"]
-            print(f" {name}   {enc}   {e['P_opt']:.4f}  {e['P_opt_given_4']:.4f}  {e['P4']:.3f}  {e['exp_norm_given_4']:+.3f}"
-                  f"  {e['mode4_pct']:6.2f} ({e['mode4_norm']:+.3f})   {round(r['frac_selected_optimal'] * 36):2d}/36")
-
-# %% [markdown]
-# **Why B loses: fitting limit or dynamics?** For each encoding we rank all 1,820 four-atom layouts by the energy of
-# the Hamiltonian actually programmed, $\sum_{i<j} U_{ij} x_i x_j$, and ask whether its lowest-energy 4-set is a true
-# optimum. If it is, any loss is due to the dynamics (finite sweep, small gaps); if not, no schedule can reach the
-# optimum and the loss is due to the encoding itself. This needs no emulation.
+# ### 3.6 Energy ranking: does the programmed Hamiltonian order the layouts correctly?
+# What decides the outcome is not how well individual couplings match ($\epsilon$) but how the programmed energy
+# $E_{\rm prog}(S) = \sum_{i<j \in S} U_{ij}$ orders the 1,820 four-atom layouts $S$ compared with the true wake
+# penalty $E_{\rm true}(S) = \sum_{i<j \in S} W_{ij}$ (lower = more power). We report the Spearman correlation between the
+# two over all layouts and over the lowest-energy 5% by true energy (91 layouts, where the ground state is decided),
+# the rank of the best true optimum under $E_{\rm prog}$ (0 = it is the programmed ground state), and the gap from the
+# programmed ground state to the next layout. This needs no emulation.
 
 # %%
 M4_IDX = np.flatnonzero(WEIGHT == M_TURB)
 B4_ALL = BITS[M4_IDX].astype(float)
+PAIR_IN_SET = np.stack([B4_ALL[:, i] * B4_ALL[:, j] for i, j in zip(*IU)], 1)   # (1820, 120)
 GRID_POS = site_coords(L_GRID)[:, ::-1].astype(float)
+N_TAIL = int(round(0.05 * len(M4_IDX)))
 
 
-def programmed_ranking(pos, d):
-    dist = np.linalg.norm(pos[:, None] - pos[None], axis=-1)
-    np.fill_diagonal(dist, np.inf)
-    E = 0.5 * np.einsum("ki,ij,kj->k", B4_ALL, dist**-6, B4_ALL)
-    order = np.argsort(E)
-    ground = M4_IDX[order[0]]
+def programmed_energy(pos):
+    return PAIR_IN_SET @ pair_U(pos)
+
+
+def ranking_metrics(pos, d):
+    E_true = -d["power_all"][M4_IDX]
+    E_prog = programmed_energy(pos)
+    tail = np.argsort(E_true)[:N_TAIL]
+    order = np.argsort(E_prog)
     rank = min(int(np.flatnonzero(M4_IDX[order] == o)[0]) for o in d["opt_idx"])
-    return dict(ground_sites=np.flatnonzero(BITS[ground]).tolist(), ground_norm=float(norm_score(d["power_all"][ground], d)),
-                opt_rank=rank, gap=float(E[order[1]] - E[order[0]]))
+    return dict(rho_all=float(spearmanr(E_prog, E_true)[0]), rho_tail=float(spearmanr(E_prog[tail], E_true[tail])[0]),
+                opt_rank=rank, gap=float(E_prog[order[1]] - E_prog[order[0]]),
+                ground_norm=float(norm_score(d["power_all"][M4_IDX[order[0]]], d)))
 
 
-programmed = {}
+ranking = {}
+print("rung enc  eps    rho(all) rho(low 5%)  optimum rank  gap")
 for name, d in INST.items():
-    for enc, pos in (("A", GRID_POS), ("B", embedding[name]["pos"])):
-        g = programmed[(name, enc)] = programmed_ranking(pos, d)
-        print(f"{name} {enc}: programmed 4-set ground state {g['ground_sites']} (S {g['ground_norm']:+.3f}); "
-              f"best rank of a true optimum {g['opt_rank']:3d} of {len(M4_IDX)}; gap to next 4-set {g['gap']:.1e}")
-assert programmed[("R1", "B")]["opt_rank"] == 0 and programmed[("R2", "B")]["opt_rank"] == 0
-assert programmed[("R3", "A")]["opt_rank"] > 0 and programmed[("R3", "B")]["opt_rank"] > 0
+    for enc, pos in (("A", GRID_POS), ("B", embedding[name]["pos"]), ("IE", embedding[name]["pos_ie"])):
+        g = ranking[(name, enc)] = dict(eps=embed_metrics(pos, d["W"])["eps"], **ranking_metrics(pos, d))
+        print(f" {name}  {enc:2s}  {g['eps']:.3f}   {g['rho_all']:+.3f}    {g['rho_tail']:+.3f}       {g['opt_rank']:4d}     {g['gap']:.1e}")
+assert all(ranking[(n, e)]["opt_rank"] == 0 for n in ("R1", "R2") for e in ("A", "B"))
+assert ranking[("R3", "A")]["opt_rank"] > 0 and ranking[("R3", "B")]["opt_rank"] > 0
 
 # %% [markdown]
-# On R1 and R2 the embedded Hamiltonian's ground 4-set is the true optimum (the four corners, as for Encoding A), so B's
-# lower P(optimal) there comes from the dynamics: equal or smaller gaps (R2: 5× smaller) and a lower P(4) at its best
-# detuning. On R3 the true optimum ranks in the hundreds under both programmed Hamiltonians. For Encoding A this is
-# structural: the optimum places turbines on grid-diagonal neighbours, which the blockade forbids. For Encoding B the
-# positions are free, so the misranking is a property of this fit (all-pairs Frobenius error, $\epsilon = 0.42$), not a
-# proof that no embedding could rank the optimum first.
+# **Pairwise $\epsilon$ does not predict solution quality.** Among the embedded registers, R1 has the worst $\epsilon$ yet
+# its programmed ground state is the true optimum, while R3 has one of the best $\epsilon$ yet its optimum ranks in the
+# hundreds. On R1 and R2 both encodings share the true optimum as programmed ground state, so Encoding B can only differ
+# from A through the dynamics (gaps, detuning, how much weight lands on exactly $m$ excitations). On R3 neither does:
+# for Encoding A this is structural (the optima put turbines on grid-diagonal neighbours, which the blockade forbids);
+# for Encoding B the positions are free, so it is a property of this fit, not a proof that no embedding could work.
+# `InteractionEmbedder` (shipped defaults) orders the layouts poorly on every rung.
+
+# %%
+def tune_and_run(register, d, omegas, deltas, tag):
+    """Scan Omega x Delta_f, select by P(exactly m) only (no ground truth), return metrics at the selected point."""
+    assert register.min_distance() >= D_MIN
+    scan_pts = {}
+    for om in omegas:
+        for df in deltas:
+            pr, _ = final_probs(register, adiabatic_drive(df, DELTA_0_A, om))
+            scan_pts[(om, df)] = (exact_metrics(pr, d), pr)
+            log_row(tag=tag, omega=om, delta_f=df, **scan_pts[(om, df)][0])
+    om, df = max(scan_pts, key=lambda k: scan_pts[k][0]["P4"])
+    return dict(omega=om, delta_f=df, exact=scan_pts[(om, df)][0],
+                resampled=resample_selection(scan_pts[(om, df)][1], d),
+                p4_grid={k: v[0]["P4"] for k, v in scan_pts.items()})
+
+
+RUN_CSV = "runs/results_full.csv"
+
+
+def log_row(**row):
+    """Full mode only: append each emulation result to a CSV on disk as it completes."""
+    if MODE != "full":
+        return
+    os.makedirs(os.path.dirname(RUN_CSV), exist_ok=True)
+    new_file = not os.path.exists(RUN_CSV)
+    with open(RUN_CSV, "a") as fh:
+        if new_file:
+            fh.write(",".join(row) + "\n")
+        fh.write(",".join(f"{v:.6g}" if isinstance(v, float) else str(v) for v in row.values()) + "\n")
+
+
+OMEGA_GRID = (OMEGA_A, 2 * OMEGA_A, DEVICE.specs["max_amplitude"])
+DELTA_SCAN_B = [0.02, 0.03, 0.04, 0.06, 0.10, 0.15, 0.2, 0.3, 0.45, 0.7, 1.0]
+
+# %% [markdown]
+# ### 3.7 Encoding B programs
+# Same pulse shape as Encoding A ($\Delta_0 = -0.10$, $T = T_{\max}$). Per rung, $\Omega \in \{1.7^{-6},
+# 2 \times 1.7^{-6}, 0.2268\}$ × $\Delta_f$ over a wide, roughly logarithmic grid (P(4) is not monotonic in $\Delta_f$ for
+# embedded registers), selected **only** by P(exactly $m$ excitations). Emulated in full mode; demo mode skips it.
+
+# %%
+results_B = {}
+if MODE == "full":
+    for name in ("R1", "R2", "R3"):
+        reg_B = Register.from_coordinates([tuple(map(float, p)) for p in embedding[name]["pos"]])
+        results_B[name] = tune_and_run(reg_B, INST[name], OMEGA_GRID, DELTA_SCAN_B, f"B_{name}")
+        r = results_B[name]
+        print(f"{name} B: selected Omega {r['omega']:.4f}, Delta_f {r['delta_f']}, P(4) {r['exact']['P4']:.3f}")
+
+# %% [markdown]
+# ### 3.8 R3 probes (time-boxed)
+# Two attempts to make R3's optimum the programmed ground state, both selected by the low-energy-tail ranking metric
+# (Spearman over the best 5% of layouts), never by the optimum's rank, which is reported only as the outcome.
+#
+# 1. **Anisotropic lattice.** Atoms on a rectangular lattice with along-wind (west–east) spacing $a_x$ and cross-wind
+#    spacing $a_y$, the smaller of the two equal to the device minimum; one scan over the aspect ratio $a_y / a_x$.
+#    Over all layouts the correlation prefers cross-wind stretching, over the low-energy tail along-wind stretching;
+#    we select by the tail, which decides the ground state.
+# 2. **Ranking-aware fit (non-scalable upper-bound probe).** Positions fitted to maximise a weighted Pearson
+#    correlation between $E_{\rm prog}$ and $E_{\rm true}$ over all 1,820 layouts, from the grid, the Encoding B layout
+#    and 20 random starts. Tail weightings (rest-of-layouts weight 0.1, 0.01, 0) are compared by the same tail metric.
+#    It enumerates all $\binom{n}{m}$ layouts, so it does not scale and serves only to probe what an embedding could
+#    achieve at this size.
+
+# %%
+ASPECTS = np.geomspace(0.25, 4.0, 17)
+
+
+def rect_lattice(aspect):
+    ax_, ay_ = (1.0, aspect) if aspect >= 1 else (1 / aspect, 1.0)
+    pos = np.c_[(np.arange(L_GRID**2) % L_GRID) * ax_, (np.arange(L_GRID**2) // L_GRID) * ay_] * D_MIN * (1 + 1e-6)
+    return pos - pos.mean(0)                     # the device measures radial distance from the origin
+
+
+aspect_scan = {a: ranking_metrics(rect_lattice(a), INST["R3"]) for a in ASPECTS}
+print("a_y/a_x  rho(all)  rho(low 5%)  optimum rank")
+for a, g in aspect_scan.items():
+    print(f" {a:5.3f}   {g['rho_all']:+.3f}    {g['rho_tail']:+.3f}       {g['opt_rank']:4d}")
+ASPECT_R3 = max(aspect_scan, key=lambda a: aspect_scan[a]["rho_tail"])
+print(f"selected a_y/a_x = {ASPECT_R3:.3f}: optimum rank {aspect_scan[ASPECT_R3]['opt_rank']}")
+
+# %%
+def ranking_fit(d, w_rest, n_random=20, seed=SEED, penalty=1e3):
+    E_true = -d["power_all"][M4_IDX]
+    tail = np.zeros(len(M4_IDX), bool)
+    tail[np.argsort(E_true)[:N_TAIL]] = True
+    w = torch.tensor(np.where(tail, 1.0, w_rest))
+    w = w / w.sum()
+    Et = torch.tensor(E_true)
+    P = torch.tensor(PAIR_IN_SET)
+    iu = torch.tensor(np.array(IU))
+
+    def objective(flat):
+        x = torch.tensor(flat, dtype=torch.float64, requires_grad=True)
+        pos = x.view(-1, 2)
+        dist = (pos[iu[0]] - pos[iu[1]]).norm(dim=1)
+        Ep = P @ dist**-6
+        a, b = Ep - (w * Ep).sum(), Et - (w * Et).sum()
+        rho = (w * a * b).sum() / torch.sqrt((w * a * a).sum() * (w * b * b).sum())
+        rad = (pos - pos.mean(0)).norm(dim=1)
+        loss = 1 - rho + penalty * (torch.relu(D_MIN - dist) ** 2).sum() + penalty * (torch.relu(rad - R_MAX) ** 2).sum()
+        loss.backward()
+        return loss.item(), x.grad.numpy().copy()
+
+    rng = np.random.default_rng(seed)
+    starts = [GRID_POS, embedding[name_probe]["pos"]] + [rng.uniform(0, 6, size=(L_GRID**2, 2)) for _ in range(n_random)]
+    fits = []
+    for x0 in starts:
+        res = minimize(objective, x0.ravel(), jac=True, method="L-BFGS-B", options=dict(maxiter=5000))
+        pos = res.x.reshape(-1, 2)
+        pos = (pos - pos.mean(0)) / np.linalg.norm(pos[:, None] - pos[None], axis=-1)[IU].min() * D_MIN * (1 + 1e-6)
+        fits.append((ranking_metrics(pos, d), pos))
+    return max(fits, key=lambda f: f[0]["rho_tail"])
+
+
+name_probe = "R3"
+rank_fits = {}
+for w_rest in (0.1, 0.01, 0.0):
+    t0 = time.perf_counter()
+    g, pos = ranking_fit(INST["R3"], w_rest)
+    rank_fits[w_rest] = (g, pos)
+    print(f"weight outside the tail {w_rest}: rho(all) {g['rho_all']:+.3f}, rho(low 5%) {g['rho_tail']:+.3f}, "
+          f"optimum rank {g['opt_rank']}, {time.perf_counter() - t0:.0f} s")
+W_REST = max(rank_fits, key=lambda w: rank_fits[w][0]["rho_tail"])
+POS_RANKFIT_R3 = rank_fits[W_REST][1]
+assert np.linalg.norm(POS_RANKFIT_R3 - POS_RANKFIT_R3.mean(0), axis=1).max() <= R_MAX
+print(f"selected weighting {W_REST}: optimum rank {rank_fits[W_REST][0]['opt_rank']}")
+
+# %%
+results_R3_probe = {}
+if MODE == "full":
+    for label, pos in (("lattice", rect_lattice(ASPECT_R3)), ("rankfit", POS_RANKFIT_R3)):
+        reg = Register.from_coordinates([tuple(map(float, p)) for p in pos])
+        results_R3_probe[label] = tune_and_run(reg, INST["R3"], OMEGA_GRID, DELTA_SCAN_B, f"R3_{label}")
+        r = results_R3_probe[label]
+        print(f"R3 {label}: selected Omega {r['omega']:.4f}, Delta_f {r['delta_f']}, P(4) {r['exact']['P4']:.3f}")
+
+# %% [markdown]
+# ### 3.9 Encoding A vs B (exact final states; S = normalised score)
+
+# %%
+if MODE == "full":
+    rows = [(n, "A", results_A[n], ranking[(n, "A")]) for n in ("R1", "R2", "R3")]
+    rows += [(n, "B", results_B[n], ranking[(n, "B")]) for n in ("R1", "R2", "R3")]
+    rows += [("R3", "B-lattice", results_R3_probe["lattice"], aspect_scan[ASPECT_R3]),
+             ("R3", "B-rankfit*", results_R3_probe["rankfit"], rank_fits[W_REST][0])]
+    rows.sort(key=lambda r: r[0])
+    print("rung encoding    P(4)   P(opt)  P(opt|4)  E[S|4]  mode-of-4 S  36x500 sel.opt  rho(low5%)  opt rank")
+    for n, enc, res, g in rows:
+        e, rs = res["exact"], res["resampled"]
+        print(f" {n}  {enc:11s} {e['P4']:.3f}  {e['P_opt']:.4f}  {e['P_opt_given_4']:.4f}  {e['exp_norm_given_4']:+.3f}"
+              f"     {e['mode4_norm']:+.3f}       {round(rs['frac_selected_optimal'] * 36):2d}/36       {g['rho_tail']:+.3f}"
+              f"     {g['opt_rank']:4d}")
+    print("* non-scalable upper-bound probe (enumerates all C(16, 4) layouts)")
+
+# %% [markdown]
+# **Reading the table.**
+# - **R1:** with $\Omega \times \Delta_f$ tuned by P(4), Encoding B matches A (P(optimal) 0.317 vs 0.320). Both
+#   programmed Hamiltonians have the true optimum as ground state with the same gap, and the fitted layout stays
+#   close to the grid.
+# - **R2:** both share the true optimum as ground state, so B's lower P(optimal) (0.34 vs 0.70) is a dynamics effect:
+#   its gap is about 5× smaller and its best P(4) is 0.48.
+# - **R3:** no encoding reaches the optimum (P(optimal) ≤ 0.0005). The two probes improve the tail ranking metric
+#   (0.62 → 0.74 and 0.83) and move the optimum's rank from 355 to 309 and 40, but the solutions get *worse*: the expected
+#   normalised score of a 4-turbine shot drops from +0.80 (A) to −0.02 (lattice) and −0.18 (ranking fit), i.e. to or
+#   below random placement. A better-ranked programmed spectrum does not survive the finite-time dynamics here.
 
 # %% [markdown]
 # ## 4. Results
@@ -761,8 +930,12 @@ assert programmed[("R3", "A")]["opt_rank"] > 0 and programmed[("R3", "B")]["opt_
 #    excited atoms and pays $\approx 0.03$–$0.06$ in van der Waals tails. Scanning $\Delta_f \in [0.06, 0.11]$ on R0 at
 #    $T_{\max}$ gives the best exact P(optimal) = 0.696 at $\Delta_f = 0.10$ (P(5) = 0.16), frozen for every rung.
 # 6. **The paper underspecifies wake-cell membership.** Several natural rules (strict vs non-strict inequalities,
-#    tolerances, cell overlap) reproduce R0 but give different optima for long wakes (R1: 2187–2238 kW). We adopt the
-#    rule that reproduces the expected optimum set on every rung.
+#    tolerances, cell overlap) reproduce R0 but give different optima for long wakes (R1: 2187–2238 kW). A first rule,
+#    chosen because it matched a set of expected R1/R3 optima (2228.6, 2238.8, unique R3 optimum), turned out to depend
+#    on floating-point rounding at the 45° cone edge and broke the grid's mirror symmetry by up to 4.2 kW; those
+#    expected values were rounding artifacts. We now exclude cells exactly on the edge ($t < r s - 10^{-9}$), which is
+#    symmetric: R0 and R2 are unchanged, R1 becomes 2229.38, and R3 has two mirror-image non-MIS optima (2242.71). With
+#    an inclusive edge instead, R3's optimum would be the corner MIS and the ladder would lose its non-native end.
 # 7. **Bit-flip SA on the penalty QUBO gets trapped.** With the paper's protocol (single-bit flips, count penalty
 #    $\lambda_1$) every move between 4-turbine layouts crosses a barrier of hundreds of kW; on R3 it never reaches the
 #    optimum in 36 runs, and neal's default cold temperature (from the smallest QUBO coefficient, $2\lambda_1$) is too
@@ -773,11 +946,15 @@ assert programmed[("R3", "A")]["opt_rank"] > 0 and programmed[("R3", "B")]["opt_
 #    24 atoms through `LocalEmulator` fails. Workaround if needed: call `SVBackend` directly with only a `StateResult`
 #    and sample in numpy.
 # 9. **`InteractionEmbedder` as a baseline.** With shipped defaults (Nelder–Mead from random positions in the unit
-#    square, no scale factor, no spacing constraint) it reaches $\epsilon$ = 0.76–0.91 and a Spearman correlation of
-#    only 0.10–0.20 with $W$, against 0.42–0.51 and 0.82–0.94 for our L-BFGS fit; on R1 its minimum spacing (0.97) is
-#    below the device minimum, so its layout would not compile on `AnalogDevice`.
+#    square, no scale factor, no spacing constraint) it reaches $\epsilon$ = 0.77–0.88 on R1–R3 and a pairwise Spearman
+#    correlation of only 0.10–0.20 with $W$, against $\epsilon$ = 0.47–0.55 and 0.69–0.99 for our L-BFGS fit; on R1 its
+#    minimum spacing (0.993) is below the device minimum, so its layout would not compile on `AnalogDevice`.
 # 10. **Minimum-distance check is exact.** A layout rescaled to minimum spacing exactly 1.0 failed `compile_to` with
 #     "minimum distance 1.0000 goes below the minimum allowed", from floating-point rounding (0.99999…). We rescale to
 #     $1 + 10^{-6}$.
-# 11. **P(4) versus $\Delta_f$ is not monotonic for embedded registers.** On R1 it has two peaks (0.52 at 0.06,
-#     0.41 at 0.45), so the per-rung $\Delta_f$ scan needs a wide, roughly logarithmic grid.
+# 11. **P(4) versus $\Delta_f$ is not monotonic for embedded registers.** On R1 (Encoding B, $\Omega = 1.7^{-6}$) it
+#     peaks at 0.72 for $\Delta_f = 0.10$, falls to 0.03 at 0.3 and rises again to 0.15 at 0.7, so the per-rung scan
+#     needs a wide, roughly logarithmic grid.
+# 12. **Radial distance is measured from the origin.** `AnalogDevice`'s `max_radial_distance` (7.6) is checked
+#     against the distance from the coordinate origin, not from the register's centre, so an uncentred register that
+#     would fit comfortably fails `compile_to` ("maximum radial distance 7.7403"). Registers are centred before compiling.
