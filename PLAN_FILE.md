@@ -2,28 +2,24 @@
 
 Oct 2, 2026 · @Advaith
 
-## Status (as of 15 Oct 2026)
+## Status (as of 16 Oct 2026)
 
-All numbers below are from the JSON results record in `wflo_rydberg.ipynb` (Phase 0 timings from the benchmark run).
+All numbers below are from the JSON results record in `wflo_rydberg.ipynb` (Phase 0 timings from the benchmark run). The notebook is the source of truth.
 
 - **Phase 0 — passed.** emu-sv 2.9.1, 16 atoms, 500 shots: 8.8 s on GPU, 33 s on CPU (QuTiP 60 s); QuTiP vs emu-sv exact P(optimal) agree to 4e-5.
-- **Phase 1 — passed.** Oracle values asserted (576; 83.728 and 17.582; R0 2304.00 with 79 optima = king-graph MIS); R1 2229.38 (1 optimum), R2 2304.00 (79), R3 2242.71 (2).
+- **Phase 1 — passed.** Oracle values asserted (576; 83.728 and 17.582; R0 2304.00 with 79 optima = king-graph MIS); R1 2229.38 (1 optimum), R2 2304.00 (79), R3 2242.71 (2). SA-swap is one draw: over 10 further seeds it is optimal in 35–36/36 runs on R0 and R3, 36 on R1, 32–36 on R2.
 - **Phase 2 — passed (G2, Tier 1 banked).** Δ_f = 0.10 (Ω = 1.7⁻⁶ ≈ 0.0414, Δ from −0.10, T = device maximum 332.4); R0 exact P(optimal) 0.696, P(4) 0.733; selection rule 36/36 optimal.
 - **Phase 3 — passed (G3).** Encoding B compiles and runs on R1–R3 (ε 0.55 / 0.47 / 0.47); B matches A on R1 (P(optimal) 0.317 vs 0.320), is worse on R2 (0.337 vs 0.696), and neither reaches the R3 optimum.
-- **Phase 4 — passed (G4).** Comparison table and S-vs-rung plot in the notebook; demo mode on CPU reproduces 296 values of the full-run record.
+- **Phase 4 — passed (G4).** Comparison tables (statistic named per column; like-for-like R0 table: our selection rule 36/36, S = 1.00, vs published VQE S −0.33 to +0.11 and published SA S ≈ −0.9 ± 0.2) and S-vs-rung plot. R3 conclusion in §4.4: scalable encodings misrank the optimum (ranks 355, 355, 176–309), the ranking-aware fit (rank 40) fails on dynamics. Lattice plateau a_y/a_x 0.25–0.42: S −0.09 to −0.02. D-Wave (Nigro et al. 2025) cited in prose only.
 - **Phase 4b — dropped.** `LocalEmulator` cannot sample above 24 atoms (torch.multinomial 2²⁴ cap) and a 25-atom run took about 22 min.
-- **Phase 5 — pending.**
+- **Phase 5 — notebook done, deck pending.** SPAM check (§3.10; 2018 literature values η 0.005, ε 0.01, ε′ 0.05; Orion values not given in the cited overview): R0 P(optimal) 0.70 → 0.52, R1 0.32 → 0.23, selection rule still 36/36; dephasing not included (39 s per Monte Carlo trajectory). QPU proposal (§6): Encoding A, one program for R0 and R1, 2 jobs × 500 shots ≈ 67 min at 0.25 Hz (Orion Beta overview); 36-job extension ≈ 20 h. Limitations, references, failure log (16 entries). Demo mode recomputes only instances, SA, one Encoding A emulation and the readout step; everything else is loaded from the record and labelled. Clean-environment test in `/tmp/judge-env` passed (timing to be re-measured at low load with 4 threads).
 
 ## Remaining work (in order)
 
-1. R3 narrative in the notebook conclusion: every scalable encoding (A, B, lattice) misranks the optimum (encoding failure); the one encoding that ranks it well (ranking-aware fit, non-scalable) then fails on finite-time dynamics; both bottlenecks bind.
-2. Like-for-like published comparison: show our selection-rule result on R0 (36/36 optimal, S = 1.00) next to the published VQE/SA numbers; keep expected S for emulator-only comparisons and label which statistic each column is.
-3. Uncertainty: published SA as S ≈ −0.9 ± 0.2 (read from the figure, ±1% reading error); the anisotropic lattice as a plateau (a_y/a_x 0.25–0.42, τ-b flat) with the S range across it, not a single tuned value.
-4. Remove the D-Wave column; one prose sentence citing the Milan headline, with the caveat that "at most 3% lower power" cannot be interpreted without that instance's random baseline (on R0 a random layout is already only about 5% below optimum).
-5. Hardware-realism check: R0 and R1 with Encoding A under Pulser SPAM/readout noise at stated realistic values (dephasing only if cheap); P(optimal), S and the selection-rule result next to the noiseless values.
-6. Notebook section "Proposed QPU experiment": R0 and R1 with Encoding A on Pasqal hardware (one program, scored for both rungs), shot budget, and what each result would establish (emulator-vs-QPU gap on a native instance; whether the van der Waals tail effect on R1 survives).
-7. Phase 5: limitations, header polish, JSON record and demo-check updates for the new results, clean-environment test in `/tmp/judge-env` (`uv venv /tmp/judge-env --python 3.11 --seed`, own kernel).
-8. Two-slide deck draft as a separate PPTX, then stop for review.
+1. Final full run with the demo-scope refactor; paste the record; demo checks pass.
+2. Clean-environment demo timing at low machine load (OMP_NUM_THREADS = 4, torch threads = 4); measured time and load in the header.
+3. Two-slide deck draft (`deck/qoolqit_wflo.pptx`, python-pptx in the dev env only; figures exported from the notebook; numbers from the JSON record); stop for review.
+4. Final review, submission.
 
 ## Overview
 
