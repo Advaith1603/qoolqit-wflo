@@ -19,17 +19,35 @@
 # **Question.** How much turbine power does a Rydberg-atom solver lose as wind-farm wake physics departs from
 # the Rydberg Hamiltonian?
 #
-# We take the published 4×4 instance of Hancock et al. (arXiv:2312.13123, following Senderovich et al. 2022),
-# show that it is exactly maximum independent set on the 4×4 king graph, and then climb a ladder of
-# increasingly non-native instances R0–R3. Each rung is solved with a native blockade encoding (A) and an
-# embedded-QUBO encoding (B), and compared with exact enumeration and simulated annealing.
+# We take the published 4×4 wind-farm instance of Hancock et al. (arXiv:2312.13123; journal version *J. Quantum
+# Computing* 7, 55–79, 2025, doi:10.32604/jqc.2025.068127; QUBO from Senderovich et al. 2022), show that it is exactly
+# maximum independent set on the 4×4 king graph, and then climb a ladder of increasingly non-native instances R0–R3.
+# Each rung is solved with a native blockade encoding (A) and an embedded-QUBO encoding (B) on QoolQit's emulator, and
+# compared with exact enumeration, simulated annealing and the published results.
+#
+# **Findings (noiseless emulation unless stated).**
+# - **R0 (published):** Rydberg-native. Exact P(optimal) 0.70; the paper's selection rule picks an optimal layout in
+#   36/36 runs ($S$ = 1.00, where $S$ = 0 is a random layout), against published VQE means of $S$ = −0.33 to +0.11.
+# - **R1–R2:** the rung-blind Encoding A keeps the optimum as its programmed ground state; P(optimal) 0.32 on R1.
+# - **R3 (long, directional wake):** no encoding reaches the optimum. Scalable encodings misrank it; the one fit that
+#   ranks it well then fails on finite-time dynamics.
+# - **With Pulser's default SPAM errors**, R0's P(optimal) falls from 0.70 to 0.52 and R1's from 0.32 to 0.23, while the
+#   selection rule still picks the optimum in 36/36 runs on both.
+# - A two-job QPU experiment on Pasqal hardware is proposed in Section 6.
 #
 # **Claim boundaries.**
-# - Emulator results only (noiseless state-vector emulation). Published numbers are reported values, kept in separate
-#   columns with their sources; published D-Wave hardware results are cited in prose only.
+# - Emulator results only. Published numbers are reported values, kept in separate columns with their sources;
+#   published D-Wave hardware results are cited in prose only.
 # - R0 is easy and Rydberg-native; a good result there is a structural observation, not quantum advantage.
 # - No speed claims: emulation time measures the classical simulator, not a device.
-# - To our knowledge this is the first published neutral-atom WFLO study we could find; we do not claim it is the first.
+# - To our knowledge this is the first published neutral-atom WFLO study we could find (Pasqal lists wind-farm layout
+#   as a use case, with no linked paper); we do not claim it is the first.
+#
+# **Running it.** Run top to bottom. `MODE = "demo"` (the default) runs on CPU, or on a GPU if one is present:
+# about 8 min on 16 free CPU threads plus about 4 min of package installation (33 min measured on a heavily shared
+# machine). It recomputes everything except Encoding B and the R3 probes and checks it against the full-run record
+# pasted in Section 4.1. `MODE = "full"` (environment variable `WFLO_MODE=full`, GPU, about 65 min) recomputes
+# everything. No external files are read.
 
 # %% [markdown]
 # ## 0. Setup
@@ -61,7 +79,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 import torch
 
-MODE = os.environ.get("WFLO_MODE", "demo")  # "demo": R0 at 4x4 on CPU, < ~15 min. "full": the remote GPU sweep.
+MODE = os.environ.get("WFLO_MODE", "demo")  # "demo": CPU, checked against the full-run record. "full": GPU sweep.
 assert MODE in ("demo", "full")
 SEED = 20261018
 N_THREADS = 16                              # shared machine: cap CPU threads
@@ -996,12 +1014,155 @@ if MODE == "full":
 #   lattice and to diabatic dynamics for the ranking fit.
 
 # %% [markdown]
+# ### 3.10 Hardware-realism check: SPAM errors on Encoding A (R0, R1)
+# Encoding A's single program is re-run under state-preparation and measurement (SPAM) errors, with the values
+# Pulser documents as its default SPAM parameters: state-preparation error $\eta = 0.005$ (probability that a given
+# atom is missing), false-positive rate $\varepsilon = 0.01$ (ground read as excited) and false-negative rate
+# $\varepsilon' = 0.05$ (excited read as ground). Source: Pulser's SPAM tutorial, "default SPAM parameters (taken from
+# [De Léséleuc et al., 2018])", i.e. arXiv:1802.10424. In Pulser 1.9.1 the `NoiseModel` defaults are all 0 ("noise
+# parameters are specific to each QPU"); these values survive as `pulser_simulation.SimConfig`'s defaults and as
+# `_LEGACY_DEFAULTS` in `pulser/noise_model.py`, both asserted below. They are representative published values, not
+# a calibration of any current device.
+#
+# Everything is exact; nothing is sampled except the 36 × 500 selection rule.
+# - **Readout errors** act on the exact final-state distribution as a tensor product of per-atom 2 × 2 confusion
+#   matrices.
+# - **State preparation.** A missing atom is handled as emu-sv does: no drive and no interactions, so it stays in the
+#   ground state and is read as 0 (before readout errors). We emulate the 15-atom register for each missing atom
+#   and weight the no-missing case by $(1-\eta)^{16} = 0.923$ and each single-missing case by $\eta(1-\eta)^{15}$
+#   (0.074 in total). The remaining mass, two or more missing atoms ($r = 0.0029$), is not simulated: every metric is
+#   reported as an interval covering any outcome on that mass. In demo mode the 16 single-missing states come from the
+#   three symmetry classes (corner, edge, bulk) of the square grid and global drive; full mode emulates all 16 and
+#   asserts that symmetry.
+# - **Dephasing** is not included. emu-sv 2.9.1 supports it only through Monte Carlo jump trajectories at 16 atoms
+#   (the density-matrix solver would need $2^{32}$ entries); one trajectory took 39 s on the GPU (about 4× a noiseless
+#   run), and ~100 trajectories would be needed per program. See Limitations.
+
+# %%
+from pulser.noise_model import _LEGACY_DEFAULTS
+from pulser_simulation import SimConfig
+
+SPAM_ETA, SPAM_EPS, SPAM_EPS_P = 0.005, 0.01, 0.05
+_sc = SimConfig.__dataclass_fields__
+assert (_sc["eta"].default, _sc["epsilon"].default, _sc["epsilon_prime"].default) == (SPAM_ETA, SPAM_EPS, SPAM_EPS_P)
+assert tuple(_LEGACY_DEFAULTS[k] for k in ("state_prep_error", "p_false_pos", "p_false_neg")) == (SPAM_ETA, SPAM_EPS, SPAM_EPS_P)
+N_Q = L_GRID**2
+GRID_XY = [(float(k % L_SIDE), float(k // L_SIDE)) for k in range(N_Q)]
+
+
+def apply_readout(probs, eps=SPAM_EPS, eps_p=SPAM_EPS_P):
+    """Exact readout channel: per-atom confusion matrix M[measured, true] applied to every qubit (qubit 0 = axis 0)."""
+    n = int(round(np.log2(len(probs))))
+    M = np.array([[1 - eps, eps_p], [eps, 1 - eps_p]])
+    t = probs.reshape((2,) * n)
+    for k in range(n):
+        t = np.moveaxis(np.tensordot(M, t, axes=([1], [k])), 0, k)
+    return t.reshape(-1)
+
+
+def embed_missing(pr15, k):
+    """15-atom distribution (site k removed) -> 16-atom distribution with bit k = 0."""
+    keep = [q for q in range(N_Q) if q != k]
+    idx = bit_matrix(N_Q - 1).astype(np.int64) @ (1 << (N_Q - 1 - np.array(keep)))
+    out = np.zeros(2**N_Q)
+    out[idx] = pr15
+    return out
+
+
+def permute_sites(probs, g):
+    """Distribution after relabelling site q -> g[q]."""
+    out = np.zeros_like(probs)
+    out[BITS.astype(np.int64) @ (1 << (N_Q - 1 - np.asarray(g)))] = probs
+    return out
+
+
+def missing_atom_state(k):
+    keep = [q for q in range(N_Q) if q != k]
+    pr, _ = final_probs(Register.from_coordinates([GRID_XY[q] for q in keep]), adiabatic_drive(DELTA_F_A, DELTA_0_A, OMEGA_A))
+    return embed_missing(pr, k)
+
+
+# Removing an atom must not change the compiled pulses (QoolQit's unit conversion must not depend on the register).
+def _compiled_without_register(reg):
+    prog = QuantumProgram(reg, adiabatic_drive(DELTA_F_A, DELTA_0_A, OMEGA_A))
+    prog.compile_to(DEVICE)
+    rep = json.loads(prog.compiled_sequence.to_abstract_repr())
+    return {k: v for k, v in rep.items() if k not in ("register", "layout")}
+
+
+assert _compiled_without_register(REG_A) == _compiled_without_register(Register.from_coordinates(GRID_XY[1:]))
+
+# Single-missing-atom states: symmetry classes in demo mode, all 16 in full mode (then the symmetry is asserted).
+CLASS_REP = {0: [0, 3, 12, 15], 1: [1, 2, 4, 7, 8, 11, 13, 14], 5: [5, 6, 9, 10]}   # corner, edge, bulk
+t0 = time.perf_counter()
+rep_states = {k0: missing_atom_state(k0) for k0 in CLASS_REP}
+missing = {}
+for k0, members in CLASS_REP.items():
+    for k in members:
+        g = next(g for g in D4 if g[k0] == k)
+        missing[k] = permute_sites(rep_states[k0], g)
+if MODE == "full":
+    for k in range(N_Q):
+        direct = missing_atom_state(k)
+        assert np.abs(direct - missing[k]).max() < 1e-4, k
+        missing[k] = direct
+print(f"single-missing-atom states: {len(missing)} ({'emulated' if MODE == 'full' else 'from 3 symmetry classes'}), "
+      f"{time.perf_counter() - t0:.0f} s")
+assert all(np.isclose(v.sum(), 1) and v[BITS[:, k] == 1].sum() == 0 for k, v in missing.items())
+
+W_NONE, W_ONE = (1 - SPAM_ETA) ** N_Q, SPAM_ETA * (1 - SPAM_ETA) ** (N_Q - 1)
+R_REST = 1 - W_NONE - N_Q * W_ONE                       # two or more missing atoms: not simulated, bounded
+Q_PREP = W_NONE * PROBS_A + W_ONE * sum(missing.values())   # unnormalised, mass 1 - R_REST
+NOISY = {"readout": (apply_readout(PROBS_A), 0.0), "SPAM": (apply_readout(Q_PREP), R_REST)}
+assert np.isclose(NOISY["readout"][0].sum(), 1) and np.isclose(NOISY["SPAM"][0].sum(), 1 - R_REST)
+print(f"weights: none missing {W_NONE:.4f}, one missing {N_Q * W_ONE:.4f} in total, two or more (bounded) {R_REST:.4f}")
+
+
+def bounded_metrics(q, r, d):
+    """Metrics of an unnormalised distribution q whose missing mass r may land anywhere: (low, high) per metric."""
+    m4 = WEIGHT == M_TURB
+    S4 = norm_score(d["power_all"], d)
+    p4, popt, sp = q[m4].sum(), q[d["opt_idx"]].sum(), (q[m4] * S4[m4]).sum()
+    s_min = S4[m4].min()
+    opt_mask = np.zeros(len(q), bool)
+    opt_mask[d["opt_idx"]] = True
+    margin = q[m4 & opt_mask].max() - q[m4 & ~opt_mask].max()   # > r: the most probable 4-turbine layout is optimal
+    return dict(P4=(p4, p4 + r), P_opt=(popt, popt + r),
+                P_opt_given_4=(popt / (p4 + r), (popt + r) / (p4 + r)),
+                exp_norm_given_4=(min(sp / p4, (sp + r * s_min) / (p4 + r)), max(sp / p4, (sp + r) / (p4 + r))),
+                mode4_optimal=bool(margin > r), mode4_margin=float(margin))
+
+
+noise_results = {}
+rng_noise = np.random.default_rng(SEED + 1)               # separate stream: leaves the main RNG sequence unchanged
+print("rung  model      P(4)           P(opt)         P(opt|4)       E[S|4]           mode-4 optimal  36x500 sel.opt (mean S)")
+for name in ("R0", "R1"):
+    d = INST[name]
+    e = results_A[name]["exact"]
+    noise_results[name] = {"noiseless": dict(
+        P4=[e["P4"]] * 2, P_opt=[e["P_opt"]] * 2, P_opt_given_4=[e["P_opt_given_4"]] * 2,
+        exp_norm_given_4=[e["exp_norm_given_4"]] * 2, mode4_optimal=e["mode4_pct"] == 100.0,
+        sel_optimal=results_A[name]["resampled"]["frac_selected_optimal"], sel_mean_norm=results_A[name]["resampled"]["mean_norm"])}
+    for label, (q, r) in NOISY.items():
+        b = bounded_metrics(q, r, d)
+        sel = resample_selection(q / q.sum(), d, rng=rng_noise)
+        noise_results[name][label] = dict(**{k: list(v) if isinstance(v, tuple) else v for k, v in b.items()},
+                                          sel_optimal=sel["frac_selected_optimal"], sel_mean_norm=sel["mean_norm"])
+    for label, g in noise_results[name].items():
+        iv = lambda k: f"{g[k][0]:.3f}" if np.isclose(*g[k]) else f"{g[k][0]:.3f}-{g[k][1]:.3f}"
+        print(f" {name}  {label:9s}  {iv('P4'):13s}  {iv('P_opt'):13s}  {iv('P_opt_given_4'):13s}  "
+              f"{g['exp_norm_given_4'][0]:+.3f}..{g['exp_norm_given_4'][1]:+.3f}   {str(g['mode4_optimal']):5s}          "
+              f"{round(g['sel_optimal'] * 36):2d}/36 ({g['sel_mean_norm']:+.3f})")
+    assert all(noise_results[name][m]["P_opt"][1] - noise_results[name][m]["P_opt"][0] <= R_REST + 1e-12 for m in NOISY)
+
+# %% [markdown]
 # ## 4. Results
 # ### 4.1 Results record
-# The full run (`MODE = "full"`, remote GPU, about 30 min) produces the record below, pasted here as a JSON literal so
+# The full run (`MODE = "full"`, remote GPU, about 65 min) produces the record below, pasted here as a JSON literal so
 # the notebook reads no external files. Demo mode recomputes everything that does not need Encoding B or the R3 probes
-# (instances, SA, Encoding A on all rungs from the R0 state, embeddings and ranking metrics) and checks it against the
-# record; Encoding B, the R3 probes and the Ω check are read from the record.
+# (instances, SA, Encoding A on all rungs from the R0 state, the SPAM check from three missing-atom emulations,
+# embeddings and ranking metrics) and checks it against the record; Encoding B, the R3 probes, the lattice plateau and
+# the Ω check are read from the record.
 
 # %%
 FULL_RESULTS = json.loads(r"""{
@@ -1895,6 +2056,152 @@ FULL_RESULTS = json.loads(r"""{
    "opt_rank": 309,
    "tau_tail": 0.567834
   }
+ },
+ "noise_A": {
+  "spam": {
+   "eta": 0.005,
+   "p_false_pos": 0.01,
+   "p_false_neg": 0.05,
+   "w_none": 0.922931,
+   "w_one_total": 0.074206,
+   "r_rest": 0.002863
+  },
+  "results": {
+   "R0": {
+    "noiseless": {
+     "P4": [
+      0.733293,
+      0.733293
+     ],
+     "P_opt": [
+      0.695962,
+      0.695962
+     ],
+     "P_opt_given_4": [
+      0.949091,
+      0.949091
+     ],
+     "exp_norm_given_4": [
+      0.992261,
+      0.992261
+     ],
+     "mode4_optimal": true,
+     "sel_optimal": 1.0,
+     "sel_mean_norm": 1.0
+    },
+    "readout": {
+     "P4": [
+      0.582884,
+      0.582884
+     ],
+     "P_opt": [
+      0.519016,
+      0.519016
+     ],
+     "P_opt_given_4": [
+      0.890427,
+      0.890427
+     ],
+     "exp_norm_given_4": [
+      0.969663,
+      0.969663
+     ],
+     "mode4_optimal": true,
+     "mode4_margin": 0.232743,
+     "sel_optimal": 1.0,
+     "sel_mean_norm": 1.0
+    },
+    "SPAM": {
+     "P4": [
+      0.581027,
+      0.58389
+     ],
+     "P_opt": [
+      0.517436,
+      0.5203
+     ],
+     "P_opt_given_4": [
+      0.886187,
+      0.891091
+     ],
+     "exp_norm_given_4": [
+      0.954172,
+      0.969777
+     ],
+     "mode4_optimal": true,
+     "mode4_margin": 0.228365,
+     "sel_optimal": 1.0,
+     "sel_mean_norm": 1.0
+    }
+   },
+   "R1": {
+    "noiseless": {
+     "P4": [
+      0.733293,
+      0.733293
+     ],
+     "P_opt": [
+      0.319738,
+      0.319738
+     ],
+     "P_opt_given_4": [
+      0.43603,
+      0.43603
+     ],
+     "exp_norm_given_4": [
+      0.892398,
+      0.892398
+     ],
+     "mode4_optimal": true,
+     "sel_optimal": 1.0,
+     "sel_mean_norm": 1.0
+    },
+    "readout": {
+     "P4": [
+      0.582884,
+      0.582884
+     ],
+     "P_opt": [
+      0.234819,
+      0.234819
+     ],
+     "P_opt_given_4": [
+      0.402857,
+      0.402857
+     ],
+     "exp_norm_given_4": [
+      0.864318,
+      0.864318
+     ],
+     "mode4_optimal": true,
+     "mode4_margin": 0.21117,
+     "sel_optimal": 1.0,
+     "sel_mean_norm": 1.0
+    },
+    "SPAM": {
+     "P4": [
+      0.581027,
+      0.58389
+     ],
+     "P_opt": [
+      0.230405,
+      0.233269
+     ],
+     "P_opt_given_4": [
+      0.394604,
+      0.399508
+     ],
+     "exp_norm_given_4": [
+      0.852789,
+      0.863564
+     ],
+     "mode4_optimal": true,
+     "mode4_margin": 0.206631,
+     "sel_optimal": 1.0,
+     "sel_mean_norm": 1.0
+    }
+   }
+  }
  }
 }""")
 
@@ -1924,6 +2231,8 @@ def collect_results():
         "ranking": {f"{n}|{e}": v for (n, e), v in ranking.items()},
         "R3_probe_selection": dict(aspect=ASPECT_R3, aspect_metrics=aspect_scan[ASPECT_R3], w_rest=W_REST,
                                    rankfit_metrics=rank_fits[W_REST][0]),
+        "noise_A": dict(spam=dict(eta=SPAM_ETA, p_false_pos=SPAM_EPS, p_false_neg=SPAM_EPS_P, w_none=W_NONE,
+                                  w_one_total=N_Q * W_ONE, r_rest=R_REST), results=noise_results),
     }
     for g in rec["sa"].values():
         g.pop("wall_s", None)
@@ -2039,8 +2348,9 @@ S_of = lambda pct: float(norm_score(pct / 100 * INST["R0"]["optimum"], INST["R0"
 sa_pub = PUBLISHED_R0["SA, pyqubo/neal (median, read off Fig. 9)"]
 a_sel = RES["A"]["R0"]["resampled"]
 sa_ours = RES["sa"]["R0|SA-swap"]
-pub = ["**R0, like for like** (one layout per run, 36 runs). Published: Hancock et al., arXiv:2312.13123 (reported "
-       "numbers, not reruns). This work: this notebook.", "",
+pub = ["**R0, like for like** (one layout per run, 36 runs). Published: Hancock et al., arXiv:2312.13123 (table and "
+       "figure numbers refer to the arXiv version; journal version J. Quantum Computing 7, 55–79, 2025, "
+       "doi:10.32604/jqc.2025.068127); reported numbers, not reruns. This work: this notebook.", "",
        "| Method (platform) | Statistic | Published raw % | Published S | This work raw % | This work S |",
        "|---|---|---|---|---|---|",
        f"| VQE, 8 variants (Qiskit simulator) | selection rule, mean of 36 runs (Table 1) | {min(vqe):.1f}–{max(vqe):.1f}% | "
@@ -2050,7 +2360,8 @@ pub = ["**R0, like for like** (one layout per run, 36 runs). Published: Hancock 
        "| Gurobi (classical) | all 36 runs (Fig. 9) | 100% | +1.00 | | |",
        f"| Rydberg A (noiseless emulator) | selection rule, mean of 36 runs of 500 shots; "
        f"{round(a_sel['frac_selected_optimal'] * 36)}/36 optimal | | | {a_sel['mean_pct']:.2f}% | {a_sel['mean_norm']:+.2f} |",
-       f"| SA-swap (classical) | mean of 36 runs; {round(sa_ours['frac_optimal'] * 36)}/36 optimal | | | "
+       f"| SA-swap (this work, classical, fixed-count SA; not the paper's SA) | mean of 36 runs; "
+       f"{round(sa_ours['frac_optimal'] * 36)}/36 optimal | | | "
        f"{sa_ours['mean_pct']:.2f}% | {sa_ours['mean_norm']:+.2f} |",
        "", f"Rydberg A's expected S of a single post-selected shot on R0 is {RES['A']['R0']['exact']['exp_norm_given_4']:+.2f} "
        "(first table); it is an emulator-only statistic and is not compared with the published numbers.",
@@ -2155,7 +2466,134 @@ print("R3 conclusion checks pass: scalable encodings misrank the optimum; the ra
 
 # %% [markdown]
 # ## 5. Limitations
-# *(Phase 5.)*
+# **Emulation, not hardware.**
+# - Every Rydberg result is an exact state-vector emulation (emu-sv). The only noise modelled is SPAM (Section 3.10),
+#   at Pulser's documented default values from De Léséleuc et al. (2018), not a calibration of a current device.
+#   Not modelled: dephasing (supported by emu-sv 2.9.1 only through Monte Carlo trajectories, 39 s each on the GPU,
+#   ~100 per program), Rydberg decay, laser amplitude and detuning fluctuations, atom-position disorder and finite
+#   temperature. Two or more missing atoms (probability 0.003) are bounded, not simulated, and a missing atom is read
+#   as 0 (Pulser/emu-sv convention); a device may report it differently.
+# - The SPAM check covers Encoding A on R0 and R1 only; Encoding B and R2–R3 are noiseless.
+#
+# **Size and scaling.**
+# - 4×4 grids, 16 atoms, $m = 4$. At this size exhaustive enumeration (1,820 layouts) and SA solve every rung exactly;
+#   the study measures how well the encodings match the physics, not whether a quantum solver can compete.
+# - The 5×5 extension was dropped: QoolQit 1.4.0's `LocalEmulator` with emu-sv cannot sample above 24 atoms, and a
+#   25-atom emulation took about 22 min (failure log, entry 8).
+# - Encodings A and B use one atom per grid site, so a 9×9 farm would need 81 atoms. By contrast, the Plymouth group's
+#   follow-up (Hancock, Craven, McNeile, arXiv:2512.17582) solves 9×9 grids with up to 20 qubits on a circuit
+#   simulator using compressed encodings (Pauli correlation encoding and single-qubit operator encoding).
+#
+# **Instances and model.**
+# - R1–R3 are our own instances, built with our wake-membership rule (the paper underspecifies it; Section 1.1). The
+#   ladder's conclusions depend on that rule at the 45° cone edge for R1 and R3 (failure log, entry 6).
+# - One wind speed, the paper's Jensen wake model with linear superposition, equal power at every site.
+#
+# **Encodings and tuning.**
+# - One pulse family (ramp, linear detuning sweep, $T$ = device maximum); only $\Omega$ and $\Delta_f$ are scanned, and
+#   only by P(exactly 4 turbines). Better schedules (longer, optimised, or local detuning) might do better on every rung.
+# - Encoding B is our own fit and not unique; the ranking-aware R3 fit is non-scalable and only an upper-bound probe.
+#
+# **Comparisons.**
+# - Published numbers are reported values, not reruns; the published SA median is read from a figure (±1% of
+#   optimum, ±0.2 in $S$). Our SA-swap is a fixed-count SA and does not reproduce the paper's SA.
+# - The 36 × 500 resampling repeats the paper's selection rule on one fixed quantum state, so its spread is shot noise,
+#   not the run-to-run spread of 36 separate optimisations.
+# - The D-Wave result (Nigro et al., 2025) is on a different instance and is cited in prose only.
+
+# %% [markdown]
+# ## 6. Proposed QPU experiment
+# **What to run.** Encoding A exactly as emulated: 16 atoms on a 4 × 4 square grid at 5 µm, $\Omega/2\pi \approx 0.37$
+# MHz, detuning swept from $-0.10$ to $+0.10$ (device units), 6 µs, one global channel. Because Encoding A is
+# rung-blind, **one program serves both R0 and R1**: the same shots are scored with each rung's power function.
+#
+# **Device.** Pasqal's Orion Beta generation (the FRESNEL QPU), from Pasqal's *Technical Overview for Advanced Users,
+# Orion Beta* (March 2025): minimum effective computation repetition rate 0.25 Hz ("only counting successful
+# computations"; the actual rate depends on the number of qubits), at most 500 runs per job, sequence duration
+# ≤ 6000 ns, Rabi frequency ≤ 2 MHz, detuning ≤ 7.75 MHz, atom spacing ≥ 5 µm, radial distance ≤ 35 µm. The cell below
+# checks the compiled program against these limits and sizes the shot budget from the SPAM-noisy distributions of
+# Section 3.10, using 0.25 Hz as a conservative throughput.
+#
+# **What each result would establish.**
+# 1. **R0, emulator-vs-QPU gap on a native instance.** R0's optima are exactly the king-graph MIS that the blockade
+#    encodes, so any shortfall against the emulator is hardware, not encoding. The prediction to test is the SPAM-noisy
+#    P(optimal) ≈ 0.52 (noiseless 0.70) and P(optimal | 4) ≈ 0.89; a measured value well below it would point to
+#    noise sources beyond SPAM (dephasing, amplitude and detuning fluctuations, atom-position disorder).
+# 2. **R1, does the van der Waals tail effect survive?** On R1 the optimum (four corners) is not selected by the
+#    blockade alone but by the weak $1/r^6$ tails at 2–3 lattice spacings, which favour spread-out layouts. On hardware
+#    these tails are the first thing positional disorder and dephasing could wash out. The test: is the four-corner
+#    layout still the most probable 4-turbine bitstring, by a statistically resolved margin? With SPAM errors the
+#    emulator predicts P(four corners) ≈ 0.23 against 0.02 for the next most probable 4-turbine layout; about 45 shots
+#    resolve that lead at 3σ, so the minimum budget can still resolve it if hardware shrinks it several-fold.
+#
+# **Budget.** Minimum: two jobs of 500 shots (about 67 min at 0.25 Hz) for both questions. Like-for-like with the
+# paper's protocol (36 runs, one selected layout each, with 500 shots per run): 36 jobs, 18,000 shots, about 20 h at
+# the minimum rate. These are emulator-based plans, not hardware results.
+
+# %%
+from pulser.sampler import sample as pulser_sample
+
+ORION_BETA = dict(ecrr_hz=0.25, max_runs=500, max_duration_ns=6000, max_rabi_MHz=2.0, max_detuning_MHz=7.75,
+                  min_distance_um=5.0, max_radial_um=35.0)   # Pasqal, Technical Overview for Advanced Users, Orion Beta
+_prog = QuantumProgram(REG_A, adiabatic_drive(DELTA_F_A, DELTA_0_A, OMEGA_A))
+_prog.compile_to(DEVICE)
+_seq = _prog.compiled_sequence
+_ch = next(iter(pulser_sample(_seq).channel_samples.values()))
+_xy = np.array([np.asarray(c, float) for c in _seq.register.qubits.values()])
+_xy_c = _xy - _xy.mean(0)
+hw = dict(duration_ns=_seq.get_duration(), rabi_MHz=float(np.max(_ch.amp.as_array(detach=True)) / (2 * np.pi)),
+          detuning_MHz=float(np.max(np.abs(_ch.det.as_array(detach=True))) / (2 * np.pi)),
+          min_distance_um=float(np.linalg.norm(_xy[:, None] - _xy[None], axis=-1)[IU].min()),
+          radial_um=float(np.linalg.norm(_xy_c, axis=1).max()))
+print("compiled program: " + ", ".join(f"{k} {v:.3g}" for k, v in hw.items()) + " (radial from the register centre)")
+assert hw["duration_ns"] <= ORION_BETA["max_duration_ns"] and hw["rabi_MHz"] <= ORION_BETA["max_rabi_MHz"]
+assert hw["detuning_MHz"] <= ORION_BETA["max_detuning_MHz"] and hw["min_distance_um"] >= ORION_BETA["min_distance_um"] - 1e-6
+assert hw["radial_um"] <= ORION_BETA["max_radial_um"]
+
+# Shot budget from the SPAM-noisy distribution (Section 3.10).
+q_noisy = NOISY["SPAM"][0] / NOISY["SPAM"][0].sum()
+p0 = q_noisy[INST["R0"]["opt_idx"]].sum()
+n_job = ORION_BETA["max_runs"]
+sigma_job = np.sqrt(p0 * (1 - p0) / n_job)
+print(f"R0: predicted P(opt) {p0:.3f}; one job of {n_job} shots gives sigma {sigma_job:.3f}, two jobs "
+      f"{np.sqrt(p0 * (1 - p0) / (2 * n_job)):.3f}")
+m4 = WEIGHT == M_TURB
+p1 = q_noisy[INST["R1"]["opt_idx"]].sum()                                 # the four corners
+p2 = np.sort(np.where(m4, q_noisy, 0))[::-1]
+p2 = p2[p2 < p1 - 1e-12][0]                                              # most probable non-optimal 4-turbine layout
+n_3sigma = int(np.ceil(9 * (p1 + p2 - (p1 - p2) ** 2) / (p1 - p2) ** 2))  # shots for a 3-sigma lead of corners over runner-up
+print(f"R1: predicted P(four corners) {p1:.3f} vs runner-up {p2:.3f}; a 3-sigma lead needs about {n_3sigma} shots")
+budget = {"minimum": 2 * n_job, "like-for-like (36 x 500)": 36 * n_job}
+for k, shots in budget.items():
+    print(f"{k:26s} {shots:6d} shots = {shots / n_job:.0f} jobs, {shots / ORION_BETA['ecrr_hz'] / 3600:.1f} h at "
+          f"{ORION_BETA['ecrr_hz']} Hz")
+assert n_3sigma <= budget["minimum"] and np.sqrt(p0 * (1 - p0) / budget["minimum"]) < 0.02
+assert round(p1, 2) == 0.23 and round(p2, 2) == 0.02 and 40 <= n_3sigma <= 50
+assert round(p0, 2) == 0.52 and round(float(np.mean(noise_results["R0"]["SPAM"]["P_opt_given_4"])), 2) == 0.89   # quoted above
+assert round(budget["minimum"] / ORION_BETA["ecrr_hz"] / 60) == 67 and round(budget["like-for-like (36 x 500)"] / ORION_BETA["ecrr_hz"] / 3600) == 20
+QPU_PLAN = dict(device=ORION_BETA, compiled=hw, R0_P_opt_pred=float(p0), R1_P_corners_pred=float(p1),
+                R1_runner_up_pred=float(p2), R1_shots_3sigma=n_3sigma, budget_shots=budget)
+
+# %% [markdown]
+# ## References
+# - J. Hancock, M. J. Craven, C. McNeile, D. Vadacchino, "Investigating Techniques to Optimise the Layout of Turbines
+#   in a Windfarm Using a Quantum Computer", arXiv:2312.13123; *Journal of Quantum Computing* 7, 55–79 (2025),
+#   doi:10.32604/jqc.2025.068127. Table and figure numbers cited here refer to the arXiv version.
+# - J. Hancock, M. Craven, C. McNeile, "Investigating methods to solve large windfarm optimization problems with a
+#   minimum number of qubits using circuit-based quantum computers", arXiv:2512.17582.
+# - L. Nigro, S. Sala, A. Amendola, E. Prati, "Leveraging Quantum Annealing for Layout Optimization", *Advanced Quantum
+#   Technologies* 8(11), e00358 (2025), doi:10.1002/qute.202500358.
+# - A. Senderovich, J. Zhang, E. Cohen, J. C. Beck, "Exploiting Hardware and Software Advances for Quadratic Models of
+#   Wind Farm Layout Optimization", *IEEE Access* 10, 78044–78055 (2022), doi:10.1109/ACCESS.2022.3193143.
+# - S. de Léséleuc, D. Barredo, V. Lienhard, A. Browaeys, T. Lahaye, "Analysis of imperfections in the coherent optical
+#   excitation of single atoms to Rydberg states", *Phys. Rev. A* 97, 053803 (2018), arXiv:1802.10424 (source of
+#   Pulser's default SPAM values).
+# - Pulser documentation, "SPAM errors" tutorial (pulser.readthedocs.io, v1.2.1) and `NoiseModel` API reference
+#   (docs.pasqal.com/pulser/noise_model).
+# - Pasqal, *Technical Overview for Advanced Users: Orion Beta* (March 2025),
+#   pasqal.com/wp-content/uploads/2025/03/Technical-Overview-for-Advanced-Users-Orion-Beta.pdf.
+# - G. Mosetti, C. Poloni, B. Diviacco, "Optimization of wind turbine positioning in large windfarms by means of a
+#   genetic algorithm", *J. Wind Eng. Ind. Aerodyn.* 51, 105–116 (1994), doi:10.1016/0167-6105(94)90080-9 (wind case 2).
 
 # %% [markdown]
 # ## Failure log
@@ -2211,3 +2649,13 @@ print("R3 conclusion checks pass: scalable encodings misrank the optimum; the ra
 #     like-for-like number is our selection-rule result (36/36 optimal, $S$ = 1.00); every column now names its
 #     statistic, and expected $S$ is used only between our own runs. Likewise, a single tuned aspect ratio for the R3
 #     lattice overstated the precision of a choice made on a flat metric; it is now reported over the whole plateau.
+# 14. **Pulser 1.9.1 has no non-zero SPAM defaults.** `NoiseModel` defaults every SPAM parameter to 0 ("noise
+#     parameters are specific to each QPU"), the current docs give no reference values, and the old SPAM tutorial URL
+#     returns 404 for the latest docs. The documented values ($\eta$ = 0.005, $\varepsilon$ = 0.01, $\varepsilon'$ = 0.05)
+#     survive only in older tutorials, `pulser_simulation.SimConfig`'s defaults and the private `_LEGACY_DEFAULTS`.
+#     `AnalogDevice` carries no noise model.
+# 15. **Dephasing on 16 atoms needs an explicit solver choice.** With only Lindblad noise, emu-sv selects the
+#     density-matrix solver by default ($2^{32}$ complex entries at 16 atoms); `Solver.MONTECARLO` must be requested.
+#     One trajectory then took 39 s on the GPU, about 4× a noiseless run, so dephasing was left out.
+# 16. **Pulser's sampled pulses are not numpy arrays.** `pulser.sampler.sample(seq).channel_samples[...].amp` is a
+#     Pulser `AbstractArray`; `.max()` fails, so `.as_array(detach=True)` is needed before checking hardware limits.
