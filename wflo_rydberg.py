@@ -25,8 +25,8 @@
 # embedded-QUBO encoding (B), and compared with exact enumeration and simulated annealing.
 #
 # **Claim boundaries.**
-# - Emulator results only (noiseless state-vector emulation). Published D-Wave numbers are hardware results and
-#   are never pooled with emulator numbers.
+# - Emulator results only (noiseless state-vector emulation). Published numbers are reported values, kept in separate
+#   columns with their sources; published D-Wave hardware results are cited in prose only.
 # - R0 is easy and Rydberg-native; a good result there is a structural observation, not quantum advantage.
 # - No speed claims: emulation time measures the classical simulator, not a device.
 # - To our knowledge this is the first published neutral-atom WFLO study we could find; we do not claim it is the first.
@@ -375,6 +375,10 @@ assert sa_results[("R0", "SA-swap")]["frac_optimal"] == 1 and sa_results[("R1", 
 # their reported numbers, not reruns; $S$ only re-expresses them against the exact random baseline
 # $P_{\rm random}$(R0) = 2187.70 kW printed in Section 1.2b. On this scale the reported VQE means lie between −0.33 and
 # +0.11, close to random placement, which suggests that "% of optimum" alone overstates performance on R0.
+#
+# **Reading uncertainty.** The SA median is read from a figure; we take a reading error of ±1% of optimum (±23 kW).
+# Because $P_{\rm opt} - P_{\rm random}$ is only 116 kW on R0, this becomes ±0.2 in $S$: the published SA median is
+# $S \approx -0.9 \pm 0.2$, i.e. below random placement for any reading within the error.
 
 # %%
 PUBLISHED_R0 = {
@@ -383,9 +387,14 @@ PUBLISHED_R0 = {
     "VQE Bayes-0.50 (mean)": 94.6, "VQE Bayes-0.25 (mean)": 93.4,
     "SA, pyqubo/neal (median, read off Fig. 9)": 100 * 2080 / 2304,
 }
+SA_READ_ERR_PCT = 1.0          # reading error of the Fig. 9 median, in % of optimum
 print(f"P_random(R0) = {INST['R0']['P_random']:.2f} kW")
 for label, pct in PUBLISHED_R0.items():
     print(f"{label:44s} {pct:6.2f}% of optimum  S = {norm_score(pct / 100 * INST['R0']['optimum'], INST['R0']):+.2f}")
+SA_PUB_S = float(norm_score(PUBLISHED_R0["SA, pyqubo/neal (median, read off Fig. 9)"] / 100 * INST["R0"]["optimum"], INST["R0"]))
+SA_PUB_S_ERR = SA_READ_ERR_PCT / 100 * INST["R0"]["optimum"] / (INST["R0"]["optimum"] - INST["R0"]["P_random"])
+print(f"published SA median: S = {SA_PUB_S:+.1f} +/- {SA_PUB_S_ERR:.1f} (reading error +/-{SA_READ_ERR_PCT:.0f}% of optimum)")
+assert round(SA_PUB_S, 1) == -0.9 and round(SA_PUB_S_ERR, 1) == 0.2 and SA_PUB_S + SA_PUB_S_ERR < 0
 
 # %% [markdown]
 # ## 3. Rydberg encodings
@@ -821,8 +830,9 @@ if MODE == "full":
 # 1. **Anisotropic lattice.** Atoms on a rectangular lattice with along-wind (west–east) spacing $a_x$ and cross-wind
 #    spacing $a_y$, the smaller of the two equal to the device minimum; one scan over the aspect ratio $a_y / a_x$.
 #    Over all layouts the correlation prefers cross-wind stretching, over the low-energy tail along-wind stretching;
-#    we select by the tail, which decides the ground state. The tail metric is flat for $a_y/a_x$ between 0.25 and 0.42,
-#    and stretching much beyond 0.25 would exceed the device's maximum radial distance.
+#    we select by the tail, which decides the ground state. The tail metric is flat (within 0.02) for $a_y/a_x$ between
+#    0.25 and 0.42, so we emulate every lattice on that plateau and report the range of results rather than a single
+#    tuned value; stretching much beyond 0.25 would exceed the device's maximum radial distance.
 # 2. **Ranking-aware fit (non-scalable upper-bound probe).** Positions fitted to maximise a weighted Pearson
 #    correlation between $E_{\rm prog}$ and $E_{\rm true}$ over all 1,820 layouts, from the grid, the Encoding B layout
 #    and 20 random starts. Tail weightings (rest-of-layouts weight 0.1, 0.01, 0) are compared by the same tail metric.
@@ -845,6 +855,12 @@ for a, g in aspect_scan.items():
     print(f" {a:5.3f}   {g['rho_all']:+.3f}    {g['tau_tail']:+.3f}       {g['opt_rank']:4d}")
 ASPECT_R3 = max(aspect_scan, key=lambda a: aspect_scan[a]["tau_tail"])
 print(f"selected a_y/a_x = {ASPECT_R3:.3f}: optimum rank {aspect_scan[ASPECT_R3]['opt_rank']}")
+# The tail metric is flat near its maximum, so the lattice is reported as a plateau, not as one tuned aspect ratio.
+PLATEAU_TOL = 0.02
+PLATEAU = [a for a in ASPECTS if aspect_scan[a]["tau_tail"] >= aspect_scan[ASPECT_R3]["tau_tail"] - PLATEAU_TOL]
+assert np.allclose(PLATEAU, ASPECTS[:4]) and np.isclose(PLATEAU[-1], 0.42, atol=1e-3)   # a_y/a_x = 0.25 ... 0.42
+print(f"plateau (tau_b within {PLATEAU_TOL} of max): a_y/a_x = {', '.join(f'{a:.3f}' for a in PLATEAU)}; "
+      f"optimum rank {min(aspect_scan[a]['opt_rank'] for a in PLATEAU)}-{max(aspect_scan[a]['opt_rank'] for a in PLATEAU)}")
 
 # %%
 def ranking_fit(d, w_rest, n_random=20, seed=SEED, penalty=1e3):
@@ -901,6 +917,14 @@ if MODE == "full":
         results_R3_probe[label] = tune_and_run(reg, INST["R3"], OMEGA_GRID, DELTA_SCAN_B, f"R3_{label}")
         r = results_R3_probe[label]
         print(f"R3 {label}: selected Omega {r['omega']:.4f}, Delta_f {r['delta_f']}, P(4) {r['exact']['P4']:.3f}")
+lattice_plateau = {}
+if MODE == "full":
+    for a in PLATEAU:
+        reg = Register.from_coordinates([tuple(map(float, p)) for p in rect_lattice(a)])
+        r = results_R3_probe["lattice"] if a == ASPECT_R3 else tune_and_run(reg, INST["R3"], OMEGA_GRID, DELTA_SCAN_B, f"R3_lattice_{a:.3f}")
+        lattice_plateau[a] = r
+        print(f"R3 lattice a_y/a_x = {a:.3f}: Omega {r['omega']:.4f}, Delta_f {r['delta_f']}, P(4) {r['exact']['P4']:.3f}, "
+              f"P(opt) {r['exact']['P_opt']:.4f}, E[S|4] {r['exact']['exp_norm_given_4']:+.3f}")
 
 # %% [markdown]
 # **Why the R3 probes score below random: dynamics or fit?** From the exact final states already computed (no new
@@ -933,7 +957,7 @@ if MODE == "full":
 # - **A and B:** the most probable shots are the programmed ground state and its nearest neighbours in energy (ranks
 #   0–10 for A, 0–30 for B), so the dynamics roughly follow each program's own low-energy layouts. The loss on R3 is in
 #   the encoding: those layouts score $S$ = +0.65 to +0.93 but are not optimal.
-# - **Anisotropic lattice: mainly fit error.** Its two most probable shots *are* its programmed ground and first excited
+# - **Anisotropic lattice ($a_y/a_x$ = 0.25): mainly fit error.** Its two most probable shots *are* its programmed ground and first excited
 #   layouts, but they are truly mediocre ($S$ = +0.40); further weight sits on programmed ranks 16–21 and 134–135 with
 #   $S$ down to −0.66, so some diabatic spreading adds to it.
 # - **Ranking-aware fit: diabatic dynamics.** Its most probable shots sit at programmed ranks 34–309, far above its
@@ -946,13 +970,13 @@ if MODE == "full":
 if MODE == "full":
     rows = [(n, "A", results_A[n], ranking[(n, "A")]) for n in ("R1", "R2", "R3")]
     rows += [(n, "B", results_B[n], ranking[(n, "B")]) for n in ("R1", "R2", "R3")]
-    rows += [("R3", "B-lattice", results_R3_probe["lattice"], aspect_scan[ASPECT_R3]),
-             ("R3", "B-rankfit*", results_R3_probe["rankfit"], rank_fits[W_REST][0])]
+    rows += [("R3", f"lattice {a:.2f}", lattice_plateau[a], aspect_scan[a]) for a in PLATEAU]
+    rows += [("R3", "B-rankfit*", results_R3_probe["rankfit"], rank_fits[W_REST][0])]
     rows.sort(key=lambda r: r[0])
     print("rung encoding    P(4)   P(opt)  P(opt|4)  E[S|4]  mode-of-4 S  36x500 sel.opt  tau_b(low5%)  opt rank")
     for n, enc, res, g in rows:
         e, rs = res["exact"], res["resampled"]
-        print(f" {n}  {enc:11s} {e['P4']:.3f}  {e['P_opt']:.4f}  {e['P_opt_given_4']:.4f}  {e['exp_norm_given_4']:+.3f}"
+        print(f" {n}  {enc:13s}{e['P4']:.3f}  {e['P_opt']:.4f}  {e['P_opt_given_4']:.4f}  {e['exp_norm_given_4']:+.3f}"
               f"     {e['mode4_norm']:+.3f}       {round(rs['frac_selected_optimal'] * 36):2d}/36       {g['tau_tail']:+.3f}"
               f"     {g['opt_rank']:4d}")
     print("* non-scalable upper-bound probe (enumerates all C(16, 4) layouts)")
@@ -965,9 +989,10 @@ if MODE == "full":
 # - **R2:** both share the true optimum as ground state, so B's lower P(optimal) (0.34 vs 0.70) is a dynamics effect:
 #   its gap is about 5× smaller and its best P(4) is 0.48.
 # - **R3:** no encoding reaches the optimum (P(optimal) ≤ 0.0005). The two probes improve the tail ranking metric
-#   ($\tau_b$ 0.50 for A → 0.57 and 0.66) and move the optimum's rank from 355 to 176 and 40, but the solutions get
-#   *worse*: the expected normalised score of a 4-turbine shot drops from +0.80 (A) to −0.09 (lattice) and −0.18
-#   (ranking fit), i.e. to or below random placement. The diagnosis above attributes this mainly to fit error for the
+#   ($\tau_b$ 0.50 for A → 0.56–0.57 across the lattice plateau and 0.66 for the ranking fit) and move the optimum's
+#   rank from 355 to 176–309 and 40, but the solutions get *worse*: the expected normalised score of a 4-turbine shot
+#   drops from +0.80 (A) to between −0.09 and −0.02 across the four plateau lattices ($a_y/a_x$ = 0.25–0.42) and to
+#   −0.18 for the ranking fit, i.e. to about random placement or below. The diagnosis above attributes this mainly to fit error for the
 #   lattice and to diabatic dynamics for the ranking fit.
 
 # %% [markdown]
@@ -1760,6 +1785,116 @@ FULL_RESULTS = json.loads(r"""{
     0.0033
    ]
   }
+ },
+ "R3_lattice_plateau": {
+  "0.250": {
+   "omega": 0.041429,
+   "delta_f": 0.02,
+   "exact": {
+    "P3": 0.138737,
+    "P4": 0.263005,
+    "P5": 0.548955,
+    "P_opt": 0.000425,
+    "P_opt_given_4": 0.001615,
+    "exp_pct_given_4": 91.354433,
+    "exp_norm_given_4": -0.090905,
+    "mode4_pct": 95.279162,
+    "mode4_norm": 0.404321
+   },
+   "resampled": {
+    "mean_pct": 88.099331,
+    "median_pct": 89.658242,
+    "min_pct": 70.719224,
+    "mean_norm": -0.501637,
+    "frac_selected_optimal": 0.0,
+    "mean_P_opt_shot": 0.000611,
+    "mean_valid_rate": 0.263167,
+    "n_no_valid": 0
+   },
+   "opt_rank": 176,
+   "tau_tail": 0.569326
+  },
+  "0.297": {
+   "omega": 0.041429,
+   "delta_f": 0.02,
+   "exact": {
+    "P3": 0.142679,
+    "P4": 0.266109,
+    "P5": 0.539622,
+    "P_opt": 0.000431,
+    "P_opt_given_4": 0.001619,
+    "exp_pct_given_4": 91.40685,
+    "exp_norm_given_4": -0.084291,
+    "mode4_pct": 95.279162,
+    "mode4_norm": 0.404321
+   },
+   "resampled": {
+    "mean_pct": 89.688416,
+    "median_pct": 89.955375,
+    "min_pct": 70.719224,
+    "mean_norm": -0.301125,
+    "frac_selected_optimal": 0.0,
+    "mean_P_opt_shot": 0.0005,
+    "mean_valid_rate": 0.264889,
+    "n_no_valid": 0
+   },
+   "opt_rank": 180,
+   "tau_tail": 0.569112
+  },
+  "0.354": {
+   "omega": 0.041429,
+   "delta_f": 0.02,
+   "exact": {
+    "P3": 0.151007,
+    "P4": 0.272118,
+    "P5": 0.52018,
+    "P_opt": 0.000443,
+    "P_opt_given_4": 0.001629,
+    "exp_pct_given_4": 91.554493,
+    "exp_norm_given_4": -0.065661,
+    "mode4_pct": 95.279162,
+    "mode4_norm": 0.404321
+   },
+   "resampled": {
+    "mean_pct": 87.80414,
+    "median_pct": 89.579274,
+    "min_pct": 70.719224,
+    "mean_norm": -0.538884,
+    "frac_selected_optimal": 0.0,
+    "mean_P_opt_shot": 0.000667,
+    "mean_valid_rate": 0.2725,
+    "n_no_valid": 0
+   },
+   "opt_rank": 299,
+   "tau_tail": 0.559413
+  },
+  "0.420": {
+   "omega": 0.041429,
+   "delta_f": 0.02,
+   "exact": {
+    "P3": 0.161159,
+    "P4": 0.278413,
+    "P5": 0.49689,
+    "P_opt": 0.000452,
+    "P_opt_given_4": 0.001624,
+    "exp_pct_given_4": 91.91522,
+    "exp_norm_given_4": -0.020145,
+    "mode4_pct": 95.279162,
+    "mode4_norm": 0.404321
+   },
+   "resampled": {
+    "mean_pct": 91.204349,
+    "median_pct": 90.922027,
+    "min_pct": 70.719224,
+    "mean_norm": -0.109843,
+    "frac_selected_optimal": 0.0,
+    "mean_P_opt_shot": 0.000167,
+    "mean_valid_rate": 0.280222,
+    "n_no_valid": 0
+   },
+   "opt_rank": 309,
+   "tau_tail": 0.567834
+  }
  }
 }""")
 
@@ -1801,6 +1936,10 @@ def collect_results():
         rec["R3_probes"] = {k: dict(omega=v["omega"], delta_f=v["delta_f"], exact=v["exact"], resampled=v["resampled"])
                             for k, v in results_R3_probe.items()}
         rec["R3_diagnosis"] = diagnosis
+        rec["R3_lattice_plateau"] = {f"{a:.3f}": dict(omega=v["omega"], delta_f=v["delta_f"], exact=v["exact"],
+                                                       resampled=v["resampled"], opt_rank=aspect_scan[a]["opt_rank"],
+                                                       tau_tail=aspect_scan[a]["tau_tail"])
+                                     for a, v in lattice_plateau.items()}
     return json.loads(json.dumps(_clean(rec)))
 
 
@@ -1835,10 +1974,22 @@ else:
     RES = RECORD
 
 # %% [markdown]
-# ### 4.2 Comparison table
-# Every cell gives the raw % of optimum and the normalised score $S$ (0 = random 4-turbine layout, 1 = optimal).
-# Emulator columns use the exact final state: the expected power of a post-selected 4-turbine shot, with P(optimal)
-# underneath. All emulator results are noiseless state-vector emulations, not hardware.
+# ### 4.2 Comparison tables
+# Every cell gives the raw % of optimum and the normalised score $S$ (0 = random 4-turbine layout, 1 = optimal), and
+# every column states its statistic, because they differ:
+# - **Expected $S$** (emulator columns of the first table and the plot): the exact expected power of one post-selected
+#   4-turbine shot, from the exact final state. It has no published counterpart and is used only to compare our own
+#   emulations and classical runs across rungs.
+# - **Selection rule** (second table): the paper's protocol, one layout per run (the most probable 4-turbine bitstring),
+#   averaged over 36 runs. This is the statistic the published VQE means use, so it is the like-for-like comparison.
+#
+# All emulator results are noiseless state-vector emulations, not hardware. Published numbers are reported values,
+# not reruns, and sit in their own columns.
+#
+# **D-Wave (prose only).** Nigro et al. (Milan; *Adv. Quantum Technol.* 8, e00358, 2025, doi:10.1002/qute.202500358)
+# that their D-Wave quantum annealer "provides solutions one order of magnitude faster than Gurobi with at most 3% lower
+# power output". We do not tabulate this: a 3% shortfall cannot be interpreted without that instance's random baseline, and
+# on R0 a random 4-turbine layout is already only about 5% below optimum.
 
 # %%
 try:
@@ -1851,36 +2002,64 @@ def cell(pct, S):
     return f"{pct:.2f}% (S {S:+.2f})"
 
 
-lines = ["| Rung | Exact optimum (kW) | Random layout | SA-swap, 36 runs (mean) | Rydberg A (emulator) | Rydberg B (emulator) |",
+def p_txt(p):
+    return "<0.001" if 0 < p < 1e-3 else f"{p:.3f}"
+
+
+lines = ["| Rung | Exact optimum (kW) | Random layout (exact mean) | SA-swap, classical: mean of 36 runs | "
+         "Rydberg A, emulator: expected S of a 4-turbine shot | Rydberg B, emulator: expected S of a 4-turbine shot |",
          "|---|---|---|---|---|---|"]
 for n in RUNGS:
     inst = RES["instances"][n]
     sa = RES["sa"][f"{n}|SA-swap"]
     a = RES["A"][n]["exact"]
-    a_txt = f"{cell(a['exp_pct_given_4'], a['exp_norm_given_4'])}<br>P(opt) {a['P_opt']:.3f}"
+    a_txt = f"{cell(a['exp_pct_given_4'], a['exp_norm_given_4'])}<br>P(opt) {p_txt(a['P_opt'])}"
     if n in RES.get("B", {}):
         b = RES["B"][n]["exact"]
-        b_txt = f"{cell(b['exp_pct_given_4'], b['exp_norm_given_4'])}<br>P(opt) {b['P_opt']:.3f}"
+        b_txt = f"{cell(b['exp_pct_given_4'], b['exp_norm_given_4'])}<br>P(opt) {p_txt(b['P_opt'])}"
     else:
         b_txt = "not run (embedding recovers the grid, ε = %.2f)" % RES["embedding"][n]["eps"]
     rand_pct = 100 * inst["P_random"] / inst["optimum"]
     lines.append(f"| {n} | {inst['optimum']:.2f} ({inst['n_optima']} optimal) | {cell(rand_pct, 0.0)} | "
                  f"{cell(sa['mean_pct'], sa['mean_norm'])} | {a_txt} | {b_txt} |")
 sa_q = "; ".join(f"{n} {cell(RES['sa'][f'{n}|SA-QUBO']['mean_pct'], RES['sa'][f'{n}|SA-QUBO']['mean_norm'])}" for n in RUNGS)
-lines += ["", f"SA-QUBO (bit-flip SA on the full QUBO, λ₁ = 1.05 × 576 chosen by scan; the paper does not state λ₁): {sa_q}."]
+plat = RES["R3_lattice_plateau"]
+plat_S = [v["exact"]["exp_norm_given_4"] for v in plat.values()]
+plat_pct = [v["exact"]["exp_pct_given_4"] for v in plat.values()]
+plat_Popt = max(v["exact"]["P_opt"] for v in plat.values())
+lines += ["", f"SA-QUBO (bit-flip SA on the full QUBO, λ₁ = 1.05 × 576 chosen by scan; the paper does not state λ₁): {sa_q}.",
+          "", f"R3 anisotropic lattice (emulator, expected S), over its τ_b plateau a_y/a_x = {min(map(float, plat)):.2f}–"
+          f"{max(map(float, plat)):.2f} ({len(plat)} lattices): {min(plat_pct):.2f}–{max(plat_pct):.2f}% "
+          f"(S {min(plat_S):+.2f} to {max(plat_S):+.2f}), P(opt) ≤ {plat_Popt:.4f}."]
 display(Markdown("\n".join(lines)) if Markdown else "\n".join(lines))
 
-pub = ["**Published results, R0 only** (reported numbers, not reruns; kept separate from the emulator columns above)", "",
-       "| Source | Method (platform) | Reported | Raw % | S |", "|---|---|---|---|---|"]
+# Like-for-like R0 comparison under the paper's selection rule. Published and our numbers stay in separate columns.
 vqe = [v for k, v in PUBLISHED_R0.items() if k.startswith("VQE")]
 S_of = lambda pct: float(norm_score(pct / 100 * INST["R0"]["optimum"], INST["R0"]))
-pub.append(f"| Hancock et al., Table 1 | VQE, 8 variants (Qiskit simulator) | mean of 36 runs | {min(vqe):.1f}–{max(vqe):.1f}% | "
-           f"{S_of(min(vqe)):+.2f} to {S_of(max(vqe)):+.2f} |")
 sa_pub = PUBLISHED_R0["SA, pyqubo/neal (median, read off Fig. 9)"]
-pub.append(f"| Hancock et al., Fig. 9 | SA, pyqubo/neal (classical) | median of 36 runs, read by eye | ≈{sa_pub:.1f}% | ≈{S_of(sa_pub):+.2f} |")
-pub.append("| Hancock et al., Fig. 9 | Gurobi (classical) | all 36 runs | 100% | +1.00 |")
-pub.append("| Milan group (D-Wave hardware) | — | not included: instance parameters not yet confirmed | — | — |")
+a_sel = RES["A"]["R0"]["resampled"]
+sa_ours = RES["sa"]["R0|SA-swap"]
+pub = ["**R0, like for like** (one layout per run, 36 runs). Published: Hancock et al., arXiv:2312.13123 (reported "
+       "numbers, not reruns). This work: this notebook.", "",
+       "| Method (platform) | Statistic | Published raw % | Published S | This work raw % | This work S |",
+       "|---|---|---|---|---|---|",
+       f"| VQE, 8 variants (Qiskit simulator) | selection rule, mean of 36 runs (Table 1) | {min(vqe):.1f}–{max(vqe):.1f}% | "
+       f"{S_of(min(vqe)):+.2f} to {S_of(max(vqe)):+.2f} | | |",
+       f"| SA, pyqubo/neal (classical) | median of 36 runs, read from Fig. 9 (±{SA_READ_ERR_PCT:.0f}% reading error) | "
+       f"≈{sa_pub:.1f} ± {SA_READ_ERR_PCT:.0f}% | ≈{SA_PUB_S:+.1f} ± {SA_PUB_S_ERR:.1f} | | |",
+       "| Gurobi (classical) | all 36 runs (Fig. 9) | 100% | +1.00 | | |",
+       f"| Rydberg A (noiseless emulator) | selection rule, mean of 36 runs of 500 shots; "
+       f"{round(a_sel['frac_selected_optimal'] * 36)}/36 optimal | | | {a_sel['mean_pct']:.2f}% | {a_sel['mean_norm']:+.2f} |",
+       f"| SA-swap (classical) | mean of 36 runs; {round(sa_ours['frac_optimal'] * 36)}/36 optimal | | | "
+       f"{sa_ours['mean_pct']:.2f}% | {sa_ours['mean_norm']:+.2f} |",
+       "", f"Rydberg A's expected S of a single post-selected shot on R0 is {RES['A']['R0']['exact']['exp_norm_given_4']:+.2f} "
+       "(first table); it is an emulator-only statistic and is not compared with the published numbers.",
+       ]
 display(Markdown("\n".join(pub)) if Markdown else "\n".join(pub))
+assert a_sel["frac_selected_optimal"] == 1.0 and round(a_sel["mean_norm"], 2) == 1.0     # like-for-like: 36/36, S = 1.00
+assert len(plat) == len(PLATEAU) and max(plat_S) < RES["A"]["R3"]["exact"]["exp_norm_given_4"]   # no lattice beats A on R3
+assert not any("D-Wave" in l for l in lines + pub)                                       # D-Wave is cited in prose only
+assert round(100 - 100 * RES["instances"]["R0"]["P_random"] / RES["instances"]["R0"]["optimum"]) == 5   # "about 5%" below
 
 # %% [markdown]
 # ### 4.3 Normalised score against rung
@@ -1895,22 +2074,35 @@ vals = {
     "Rydberg B (emulator)": [RES["B"][n]["exact"]["exp_norm_given_4"] if n in RES.get("B", {}) else np.nan for n in rungs],
     "SA-swap (classical)": [RES["sa"][f"{n}|SA-swap"]["mean_norm"] for n in rungs],
 }
-fig, ax = plt.subplots(figsize=(7.5, 4.8), facecolor="#fcfcfb")
+fig, ax = plt.subplots(figsize=(8, 5.4), facecolor="#fcfcfb")
 ax.set_facecolor("#fcfcfb")
 ax.axhline(0, color=BASE, lw=1.5, zorder=1)
 ax.text(0.55, 0.03, "random layout (S = 0)", color=MUTED, fontsize=9, va="bottom")
+STAT = {"Rydberg A (emulator)": "expected S of one shot", "Rydberg B (emulator)": "expected S of one shot",
+        "SA-swap (classical)": "mean of 36 runs"}
+# R0, like for like (one selected layout per run, 36 runs): published VQE means and SA median next to our selection rule.
+X_LL = -0.36
+ax.axvline(-0.17, color=GRIDC, lw=1, ls=(0, (2, 3)), zorder=1)
 lo, hi = S_of(min(vqe)), S_of(max(vqe))
-ax.add_patch(plt.Rectangle((-0.42, lo), 0.16, hi - lo, facecolor="none", edgecolor=INK2, hatch="////", lw=1, zorder=2))
-ax.text(-0.22, (lo + hi) / 2, "published VQE means\n(simulator, R0 only)", color=INK2, fontsize=8, va="center")
+ax.add_patch(plt.Rectangle((X_LL - 0.07, lo), 0.14, hi - lo, facecolor="none", edgecolor=INK2, hatch="////", lw=1, zorder=2))
+ax.text(X_LL + 0.12, (lo + hi) / 2, "published VQE means\n(simulator)", color=INK2, fontsize=8, va="center")
+ax.errorbar([X_LL], [SA_PUB_S], yerr=[SA_PUB_S_ERR], fmt="s", ms=7, mfc="#fcfcfb", mec=INK2, ecolor=INK2, mew=1.5,
+            capsize=3, zorder=3)
+ax.text(X_LL + 0.12, SA_PUB_S, "published SA median\n(read from figure, ±0.2)", color=INK2, fontsize=8, va="center")
+ax.plot([X_LL], [RES["A"]["R0"]["resampled"]["mean_norm"]], marker="D", ms=8, mfc="#fcfcfb", mec=SERIES["Rydberg A (emulator)"][0],
+        mew=2, ls="none", zorder=4)
+ax.text(X_LL, 0.90, "A, selection\nrule (36/36)", color=INK2, fontsize=8, va="top", ha="center")
+ax.text(X_LL, SA_PUB_S - SA_PUB_S_ERR - 0.06, "R0, one layout\nper run, 36 runs", color=MUTED,
+        fontsize=8, va="top", ha="center")
 for label, ys in vals.items():
     color, marker = SERIES[label]
-    ax.plot(xs, ys, color=color, lw=2, marker=marker, ms=8, mec="#fcfcfb", mew=2, zorder=3, label=label)
+    ax.plot(xs, ys, color=color, lw=2, marker=marker, ms=8, mec="#fcfcfb", mew=2, zorder=3, label=f"{label}: {STAT[label]}")
     last = max(i for i, v in enumerate(ys) if np.isfinite(v))
     ax.text(xs[last] + 0.08, ys[last], label.split(" (")[0], color=INK2, fontsize=9, va="center")
 ax.set_xticks(xs, [f"{n}\nx={RUNGS[n][0]}, r={RUNGS[n][1]:g}\n{RUNGS[n][2]}" for n in rungs], color=INK2, fontsize=9)
-ax.set_xlim(-0.6, len(rungs) - 1 + 1.1)
-ax.set_ylim(min(-0.5, lo - 0.25), 1.08)
-ax.set_ylabel("S of a post-selected 4-turbine layout\n(0 = random, 1 = optimal)", color=INK2, fontsize=9)
+ax.set_xlim(-0.75, len(rungs) - 1 + 1.1)
+ax.set_ylim(SA_PUB_S - SA_PUB_S_ERR - 0.35, 1.08)
+ax.set_ylabel("normalised score S\n(0 = random layout, 1 = optimal)", color=INK2, fontsize=9)
 ax.tick_params(colors=MUTED, labelsize=9)
 ax.grid(axis="y", color=GRIDC, lw=0.8)
 ax.set_axisbelow(True)
@@ -1918,7 +2110,7 @@ for side in ("top", "right"):
     ax.spines[side].set_visible(False)
 for side in ("left", "bottom"):
     ax.spines[side].set_color(BASE)
-ax.legend(loc="upper center", bbox_to_anchor=(0.5, -0.2), ncol=3, frameon=False, fontsize=9, labelcolor=INK2)
+ax.legend(loc="upper center", bbox_to_anchor=(0.5, -0.2), ncol=2, frameon=False, fontsize=9, labelcolor=INK2)
 ax.set_title("Solution quality as wake physics departs from the Rydberg Hamiltonian", color=INK, fontsize=11, loc="left")
 plt.tight_layout()
 plt.show()
@@ -1926,6 +2118,40 @@ plt.show()
 # Phase 4 exit: every rung has exact, random, SA-swap and Encoding A entries; B on R1-R3.
 assert all(n in RES["A"] and f"{n}|SA-swap" in RES["sa"] for n in RUNGS)
 assert all(n in RES["B"] for n in ("R1", "R2", "R3"))
+
+# %% [markdown]
+# ### 4.4 Conclusions
+# - **R0 (published instance) is Rydberg-native.** Its 79 optima are the 79 independent 4-sets of the 4×4 king graph,
+#   so a blockade register solves it directly: exact P(optimal) 0.70 and the paper's selection rule picks an optimal
+#   layout in 36/36 resampled runs. This is a structural observation about the instance, not a quantum advantage.
+# - **R1 (long wake, uniform wind):** the rung-blind Encoding A still has the optimum as its programmed ground state,
+#   because the van der Waals tails favour spread-out layouts; P(optimal) halves to 0.32. Encoding B matches A.
+# - **R2 (short wake, prevailing west wind):** the optimum set is unchanged, so A is unaffected; B is worse through
+#   its dynamics (a gap about 5× smaller), not its ranking.
+# - **R3 (long wake, prevailing west wind): both bottlenecks bind.** Every scalable encoding (A, B and the anisotropic
+#   lattice) misranks the optimum: 355, 355 and 176–309 of the 1,820 four-turbine layouts are programmed below it, and
+#   their most probable shots are their own programmed low-energy layouts, which are good but not optimal. That is an
+#   encoding failure. The one encoding that ranks the optimum well, the ranking-aware fit (rank 40; non-scalable, it
+#   enumerates every layout), then fails on finite-time dynamics: its most probable shots sit at programmed ranks
+#   34–309, and its expected $S$ falls below random. On every R3 program P(optimal) stays below 0.001.
+
+# %%
+# Checks behind the R3 conclusion (ranks: 0 = programmed ground state, of 1,820 layouts).
+_diag = RES["R3_diagnosis"]
+_plateau_ranks = [aspect_scan[a]["opt_rank"] for a in PLATEAU]
+assert RES["ranking"]["R3|A"]["opt_rank"] == RES["ranking"]["R3|B"]["opt_rank"] == 355
+assert min(_plateau_ranks) == 176 and max(_plateau_ranks) == 309                  # lattice plateau: still misranked
+assert RES["R3_probe_selection"]["rankfit_metrics"]["opt_rank"] == 40              # ranking-aware fit ranks it well
+# Encoding failure: A, B and the lattice put their top weight on their own programmed low-energy layouts, none optimal.
+assert max(_diag["A"]["prog_rank"]) <= 10 and max(_diag["B"]["prog_rank"]) <= 30
+assert _diag["B-lattice"]["prog_rank"][:2] == [0, 1]
+assert all(s < 1 for k in ("A", "B", "B-lattice") for s in _diag[k]["S"])
+# Dynamics failure: the ranking-aware fit's most probable shots are far above its programmed ground state.
+assert min(_diag["B-rankfit"]["prog_rank"]) == 34 and max(_diag["B-rankfit"]["prog_rank"]) == 309
+assert RES["R3_probes"]["rankfit"]["exact"]["exp_norm_given_4"] < 0
+assert max(RES["A"]["R3"]["exact"]["P_opt"], RES["B"]["R3"]["exact"]["P_opt"],
+           *(v["exact"]["P_opt"] for v in RES["R3_probes"].values())) < 1e-3
+print("R3 conclusion checks pass: scalable encodings misrank the optimum; the ranking-aware fit fails on dynamics")
 
 # %% [markdown]
 # ## 5. Limitations
@@ -1980,3 +2206,8 @@ assert all(n in RES["B"] for n in ("R1", "R2", "R3"))
 # 12. **Radial distance is measured from the origin.** `AnalogDevice`'s `max_radial_distance` (7.6) is checked
 #     against the distance from the coordinate origin, not from the register's centre, so an uncentred register that
 #     would fit comfortably fails `compile_to` ("maximum radial distance 7.7403"). Registers are centred before compiling.
+# 13. **Comparing different statistics.** A first version of the comparison set the published VQE means (one selected
+#     layout per run, averaged over runs) against our expected $S$ of a single post-selected shot (+0.99 on R0). The
+#     like-for-like number is our selection-rule result (36/36 optimal, $S$ = 1.00); every column now names its
+#     statistic, and expected $S$ is used only between our own runs. Likewise, a single tuned aspect ratio for the R3
+#     lattice overstated the precision of a choice made on a flat metric; it is now reported over the whole plateau.
