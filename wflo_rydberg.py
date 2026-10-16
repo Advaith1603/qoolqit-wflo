@@ -16,23 +16,30 @@
 # %% [markdown]
 # # Wind Farm Layout Optimization on simulated Rydberg atoms with QoolQit
 #
+# Built and tested with QoolQit 1.4.0 (Python 3.11.17 on Linux). Requirements: internet access for the install cell;
+# about 3 GB of downloads on Linux (mostly torch and its CUDA libraries, pulled in through qoolqit's dependencies) and
+# about 6 GB on disk; Python 3.11 or newer (the pinned numpy, scipy and matplotlib require ≥ 3.11; qoolqit 1.4.0 declares
+# 3.10–3.13), tested on 3.11 only; no GPU required.
+#
 # **Question.** How much turbine power does a Rydberg-atom solver lose as wind-farm wake physics departs from
 # the Rydberg Hamiltonian?
 #
 # We take the published 4×4 wind-farm instance of Hancock et al. (arXiv:2312.13123; journal version *J. Quantum
 # Computing* 7, 55–79, 2025, doi:10.32604/jqc.2025.068127; QUBO from Senderovich et al. 2022), show that it is exactly
 # maximum independent set on the 4×4 king graph, and then climb a ladder of increasingly non-native instances R0–R3.
-# Each rung is solved with a native blockade encoding (A) and an embedded-QUBO encoding (B) on QoolQit's emulator, and
-# compared with exact enumeration, simulated annealing and the published results.
+# Each rung is encoded with a native blockade encoding (A) and an embedded-QUBO encoding (B), emulated with QoolQit,
+# and compared with exact enumeration, simulated annealing and the published results.
 #
 # **Findings (noiseless emulation unless stated).**
 # - **R0 (published):** Rydberg-native. Exact P(optimal) 0.70; the paper's selection rule picks an optimal layout in
-#   36/36 runs ($S$ = 1.00, where $S$ = 0 is a random layout), against published VQE means of $S$ = −0.33 to +0.11.
-# - **R1–R2:** the rung-blind Encoding A keeps the optimum as its programmed ground state; P(optimal) 0.32 on R1.
+#   36/36 runs for each of 11 resampling seeds ($S$ = 1.00, where $S$ = 0 is a random layout), against published VQE
+#   means of $S$ = −0.33 to +0.11.
+# - **R1–R2:** the rung-blind Encoding A keeps the optimum as its programmed ground state (P(optimal) 0.32 on R1), and
+#   the selection rule again picks it in 36/36 runs for each of the 11 seeds.
 # - **R3 (long, directional wake):** no encoding reaches the optimum. Scalable encodings misrank it; the one fit that
 #   ranks it well then fails on finite-time dynamics.
 # - **With Pulser's default SPAM errors**, R0's P(optimal) falls from 0.70 to 0.52 and R1's from 0.32 to 0.23, while the
-#   selection rule still picks the optimum in 36/36 runs on both.
+#   selection rule still picks the optimum in 36/36 runs on both, for each of 11 resampling seeds.
 # - A two-job QPU experiment on Pasqal hardware is proposed in Section 6.
 #
 # **Claim boundaries.**
@@ -44,7 +51,8 @@
 #   as a use case, with no linked paper); we do not claim it is the first.
 #
 # **Running it.** Run top to bottom. `MODE = "demo"` (the default) runs on CPU, or on a GPU if one is present:
-# DEMO_RUNTIME. It recomputes the instances, SA, one Encoding A emulation and the readout-error step, checks them
+# about 1 min of compute (measured: 4 CPU threads on a heavily loaded shared machine, load ~63) plus about 4 min of
+# installation. It recomputes the instances, SA, one Encoding A emulation and the readout-error step, checks them
 # against the full-run record pasted in Section 0.1, and loads everything else from that record (labelled in the
 # output). `MODE = "full"` (environment variable `WFLO_MODE=full`, GPU, about 65 min) recomputes
 # everything. No external files are read.
@@ -94,8 +102,21 @@ RNG = np.random.default_rng(SEED)   # shared stream: SA, then the selection-rule
 
 
 def rng_for(key):
-    """Independent, reproducible random stream for later additions (SPAM resampling, SA seed check)."""
+    """Independent, reproducible random stream for later additions (SPAM resampling, seed checks)."""
     return np.random.default_rng([SEED, zlib.crc32(key.encode())])
+
+
+N_SEEDS = 11   # seed checks: the main draw plus 10 independent seeds
+
+
+def seed_range(runs, key):
+    """(min, max) of one summary statistic over the seed runs."""
+    return min(r[key] for r in runs), max(r[key] for r in runs)
+
+
+def fmt_range(lo, hi, f="{:.2f}"):
+    a, b = f.format(lo), f.format(hi)
+    return a if a == b else f"{a}–{b}"
 
 print(f"MODE={MODE}  SEED={SEED}  GPU={GPU}" + (f" ({torch.cuda.get_device_name(0)})" if GPU else "")
       + f"  threads={N_THREADS} (OMP_NUM_THREADS={os.environ['OMP_NUM_THREADS']})")
@@ -103,6 +124,12 @@ print(f"python {platform.python_version()}")
 for p in PINNED:
     print(f"  {p:18s} {_installed(p)}")
 assert all(_installed(p) == v for p, v in PINNED.items()), "pinned versions not active; restart the kernel after install"
+
+import qoolqit
+
+assert qoolqit.__version__ == "1.4.0", (
+    f"qoolqit {qoolqit.__version__} is loaded, but this notebook was built and tested with qoolqit 1.4.0. "
+    "If the install cell above just installed packages, restart the kernel and run the notebook again from the top.")
 
 # %% [markdown]
 # ### 0.1 Full-run record
@@ -144,32 +171,60 @@ FULL_RESULTS = json.loads(r"""
 "R3":{"exact":{"P3":0.099173,"P4":0.733293,"P5":0.16309,"P_opt":0.0,"P_opt_given_4":0.0,"exp_pct_given_4":98.390267,
 "exp_norm_given_4":0.796883,"mode4_pct":99.405766,"mode4_norm":0.925019},"resampled":{"mean_pct":99.405766,
 "median_pct":99.405766,"min_pct":99.405766,"mean_norm":0.925019,"frac_selected_optimal":0.0,"mean_P_opt_shot":0.0,
-"mean_valid_rate":0.729056,"n_no_valid":0}}},"A_schedule":{"omega":0.041429,"delta_0":-0.1,"delta_f":0.1,
-"T":332.43764},"delta_scan_R0":{"0.06":{"P3":0.399307,"P4":0.464661,"P5":0.024207,"P_opt":0.436089,
-"P_opt_given_4":0.93851,"exp_pct_given_4":99.952811,"exp_norm_given_4":0.990651,"mode4_pct":100.0,"mode4_norm":1.0},
-"0.07":{"P3":0.320763,"P4":0.583009,"P5":0.038566,"P_opt":0.550158,"P_opt_given_4":0.943651,
-"exp_pct_given_4":99.95673,"exp_norm_given_4":0.991428,"mode4_pct":100.0,"mode4_norm":1.0},"0.08":{"P3":0.232204,
-"P4":0.675501,"P5":0.064963,"P_opt":0.638312,"P_opt_given_4":0.944945,"exp_pct_given_4":99.957734,
-"exp_norm_given_4":0.991627,"mode4_pct":100.0,"mode4_norm":1.0},"0.09":{"P3":0.154359,"P4":0.725167,"P5":0.108768,
-"P_opt":0.685646,"P_opt_given_4":0.945501,"exp_pct_given_4":99.958182,"exp_norm_given_4":0.991715,"mode4_pct":100.0,
-"mode4_norm":1.0},"0.1":{"P3":0.099173,"P4":0.733293,"P5":0.16309,"P_opt":0.695962,"P_opt_given_4":0.949091,
-"exp_pct_given_4":99.960939,"exp_norm_given_4":0.992261,"mode4_pct":100.0,"mode4_norm":1.0},"0.11":{"P3":0.067208,
-"P4":0.706725,"P5":0.224191,"P_opt":0.672444,"P_opt_given_4":0.951494,"exp_pct_given_4":99.962707,
-"exp_norm_given_4":0.992612,"mode4_pct":100.0,"mode4_norm":1.0}},"noise_A":{"spam":{"eta":0.005,"p_false_pos":0.01,
-"p_false_neg":0.05,"w_none":0.922931,"w_one_total":0.074206,"r_rest":0.002863},
-"results":{"R0":{"noiseless":{"P4":[0.733293,0.733293],"P_opt":[0.695962,0.695962],"P_opt_given_4":[0.949091,
-0.949091],"exp_norm_given_4":[0.992261,0.992261],"mode4_optimal":true,"sel_optimal":1.0,"sel_mean_norm":1.0},
+"mean_valid_rate":0.729056,"n_no_valid":0}}},"A_sel_seed_runs":{"R0":[{"mean_pct":100.0,"mean_norm":1.0,
+"frac_selected_optimal":1.0},{"mean_pct":100.0,"mean_norm":1.0,"frac_selected_optimal":1.0},{"mean_pct":100.0,
+"mean_norm":1.0,"frac_selected_optimal":1.0},{"mean_pct":100.0,"mean_norm":1.0,"frac_selected_optimal":1.0},
+{"mean_pct":100.0,"mean_norm":1.0,"frac_selected_optimal":1.0},{"mean_pct":100.0,"mean_norm":1.0,
+"frac_selected_optimal":1.0},{"mean_pct":100.0,"mean_norm":1.0,"frac_selected_optimal":1.0},{"mean_pct":100.0,
+"mean_norm":1.0,"frac_selected_optimal":1.0},{"mean_pct":100.0,"mean_norm":1.0,"frac_selected_optimal":1.0},
+{"mean_pct":100.0,"mean_norm":1.0,"frac_selected_optimal":1.0}],"R1":[{"mean_pct":100.0,"mean_norm":1.0,
+"frac_selected_optimal":1.0},{"mean_pct":100.0,"mean_norm":1.0,"frac_selected_optimal":1.0},{"mean_pct":100.0,
+"mean_norm":1.0,"frac_selected_optimal":1.0},{"mean_pct":100.0,"mean_norm":1.0,"frac_selected_optimal":1.0},
+{"mean_pct":100.0,"mean_norm":1.0,"frac_selected_optimal":1.0},{"mean_pct":100.0,"mean_norm":1.0,
+"frac_selected_optimal":1.0},{"mean_pct":100.0,"mean_norm":1.0,"frac_selected_optimal":1.0},{"mean_pct":100.0,
+"mean_norm":1.0,"frac_selected_optimal":1.0},{"mean_pct":100.0,"mean_norm":1.0,"frac_selected_optimal":1.0},
+{"mean_pct":100.0,"mean_norm":1.0,"frac_selected_optimal":1.0}],"R2":[{"mean_pct":100.0,"mean_norm":1.0,
+"frac_selected_optimal":1.0},{"mean_pct":100.0,"mean_norm":1.0,"frac_selected_optimal":1.0},{"mean_pct":100.0,
+"mean_norm":1.0,"frac_selected_optimal":1.0},{"mean_pct":100.0,"mean_norm":1.0,"frac_selected_optimal":1.0},
+{"mean_pct":100.0,"mean_norm":1.0,"frac_selected_optimal":1.0},{"mean_pct":100.0,"mean_norm":1.0,
+"frac_selected_optimal":1.0},{"mean_pct":100.0,"mean_norm":1.0,"frac_selected_optimal":1.0},{"mean_pct":100.0,
+"mean_norm":1.0,"frac_selected_optimal":1.0},{"mean_pct":100.0,"mean_norm":1.0,"frac_selected_optimal":1.0},
+{"mean_pct":100.0,"mean_norm":1.0,"frac_selected_optimal":1.0}],"R3":[{"mean_pct":99.405766,"mean_norm":0.925019,
+"frac_selected_optimal":0.0},{"mean_pct":99.405766,"mean_norm":0.925019,"frac_selected_optimal":0.0},
+{"mean_pct":99.405766,"mean_norm":0.925019,"frac_selected_optimal":0.0},{"mean_pct":99.405766,"mean_norm":0.925019,
+"frac_selected_optimal":0.0},{"mean_pct":99.405766,"mean_norm":0.925019,"frac_selected_optimal":0.0},
+{"mean_pct":99.405766,"mean_norm":0.925019,"frac_selected_optimal":0.0},{"mean_pct":99.405766,"mean_norm":0.925019,
+"frac_selected_optimal":0.0},{"mean_pct":99.405766,"mean_norm":0.925019,"frac_selected_optimal":0.0},
+{"mean_pct":99.405766,"mean_norm":0.925019,"frac_selected_optimal":0.0},{"mean_pct":99.405766,"mean_norm":0.925019,
+"frac_selected_optimal":0.0}]},"A_schedule":{"omega":0.041429,"delta_0":-0.1,"delta_f":0.1,"T":332.43764},
+"delta_scan_R0":{"0.06":{"P3":0.399307,"P4":0.464661,"P5":0.024207,"P_opt":0.436089,"P_opt_given_4":0.93851,
+"exp_pct_given_4":99.952811,"exp_norm_given_4":0.990651,"mode4_pct":100.0,"mode4_norm":1.0},"0.07":{"P3":0.320763,
+"P4":0.583009,"P5":0.038566,"P_opt":0.550158,"P_opt_given_4":0.943651,"exp_pct_given_4":99.95673,
+"exp_norm_given_4":0.991428,"mode4_pct":100.0,"mode4_norm":1.0},"0.08":{"P3":0.232204,"P4":0.675501,"P5":0.064963,
+"P_opt":0.638312,"P_opt_given_4":0.944945,"exp_pct_given_4":99.957734,"exp_norm_given_4":0.991627,"mode4_pct":100.0,
+"mode4_norm":1.0},"0.09":{"P3":0.154359,"P4":0.725167,"P5":0.108768,"P_opt":0.685646,"P_opt_given_4":0.945501,
+"exp_pct_given_4":99.958182,"exp_norm_given_4":0.991715,"mode4_pct":100.0,"mode4_norm":1.0},"0.1":{"P3":0.099173,
+"P4":0.733293,"P5":0.16309,"P_opt":0.695962,"P_opt_given_4":0.949091,"exp_pct_given_4":99.960939,
+"exp_norm_given_4":0.992261,"mode4_pct":100.0,"mode4_norm":1.0},"0.11":{"P3":0.067208,"P4":0.706725,"P5":0.224191,
+"P_opt":0.672444,"P_opt_given_4":0.951494,"exp_pct_given_4":99.962707,"exp_norm_given_4":0.992612,"mode4_pct":100.0,
+"mode4_norm":1.0}},"noise_A":{"spam":{"eta":0.005,"p_false_pos":0.01,"p_false_neg":0.05,"w_none":0.922931,
+"w_one_total":0.074206,"r_rest":0.002863},"results":{"R0":{"noiseless":{"P4":[0.733293,0.733293],"P_opt":[0.695962,
+0.695962],"P_opt_given_4":[0.949091,0.949091],"exp_norm_given_4":[0.992261,0.992261],"mode4_optimal":true,
+"sel_optimal":1.0,"sel_mean_norm":1.0,"sel_optimal_range":[1.0,1.0],"sel_mean_norm_range":[1.0,1.0]},
 "readout":{"P4":[0.582884,0.582884],"P_opt":[0.519016,0.519016],"P_opt_given_4":[0.890427,0.890427],
 "exp_norm_given_4":[0.969663,0.969663],"mode4_optimal":true,"mode4_margin":0.232743,"sel_optimal":1.0,
-"sel_mean_norm":1.0},"SPAM":{"P4":[0.581027,0.58389],"P_opt":[0.517436,0.5203],"P_opt_given_4":[0.886187,0.891091],
-"exp_norm_given_4":[0.954172,0.969777],"mode4_optimal":true,"mode4_margin":0.228365,"sel_optimal":1.0,
-"sel_mean_norm":1.0}},"R1":{"noiseless":{"P4":[0.733293,0.733293],"P_opt":[0.319738,0.319738],
+"sel_mean_norm":1.0,"sel_optimal_range":[1.0,1.0],"sel_mean_norm_range":[1.0,1.0]},"SPAM":{"P4":[0.581027,0.58389],
+"P_opt":[0.517436,0.5203],"P_opt_given_4":[0.886187,0.891091],"exp_norm_given_4":[0.954172,0.969777],
+"mode4_optimal":true,"mode4_margin":0.228365,"sel_optimal":1.0,"sel_mean_norm":1.0,"sel_optimal_range":[1.0,1.0],
+"sel_mean_norm_range":[1.0,1.0]}},"R1":{"noiseless":{"P4":[0.733293,0.733293],"P_opt":[0.319738,0.319738],
 "P_opt_given_4":[0.43603,0.43603],"exp_norm_given_4":[0.892398,0.892398],"mode4_optimal":true,"sel_optimal":1.0,
-"sel_mean_norm":1.0},"readout":{"P4":[0.582884,0.582884],"P_opt":[0.234819,0.234819],"P_opt_given_4":[0.402857,
-0.402857],"exp_norm_given_4":[0.864318,0.864318],"mode4_optimal":true,"mode4_margin":0.21117,"sel_optimal":1.0,
-"sel_mean_norm":1.0},"SPAM":{"P4":[0.581027,0.58389],"P_opt":[0.230405,0.233269],"P_opt_given_4":[0.394604,0.399508],
-"exp_norm_given_4":[0.852789,0.863564],"mode4_optimal":true,"mode4_margin":0.206631,"sel_optimal":1.0,
-"sel_mean_norm":1.0}}}},"mapping_test":{"0":[0.968411,0.96992],"3":[0.968411,0.96992]},
+"sel_mean_norm":1.0,"sel_optimal_range":[1.0,1.0],"sel_mean_norm_range":[1.0,1.0]},"readout":{"P4":[0.582884,
+0.582884],"P_opt":[0.234819,0.234819],"P_opt_given_4":[0.402857,0.402857],"exp_norm_given_4":[0.864318,0.864318],
+"mode4_optimal":true,"mode4_margin":0.21117,"sel_optimal":1.0,"sel_mean_norm":1.0,"sel_optimal_range":[1.0,1.0],
+"sel_mean_norm_range":[1.0,1.0]},"SPAM":{"P4":[0.581027,0.58389],"P_opt":[0.230405,0.233269],
+"P_opt_given_4":[0.394604,0.399508],"exp_norm_given_4":[0.852789,0.863564],"mode4_optimal":true,
+"mode4_margin":0.206631,"sel_optimal":1.0,"sel_mean_norm":1.0,"sel_optimal_range":[1.0,1.0],
+"sel_mean_norm_range":[1.0,1.0]}}}},"mapping_test":{"0":[0.968411,0.96992],"3":[0.968411,0.96992]},
 "embedding":{"R0":{"eps":0.073497,"spearman":0.845015,"eps_ie":0.911254,"spearman_ie":0.105947,"pos":[[-1.501332,
 -1.501332],[-0.500448,-1.500039],[0.500448,-1.500039],[1.501332,-1.501332],[-1.500039,-0.500448],[-0.500038,
 -0.500038],[0.500038,-0.500038],[1.500039,-0.500448],[-1.500039,0.500448],[-0.500038,0.500038],[0.500038,0.500038],
@@ -253,18 +308,38 @@ FULL_RESULTS = json.loads(r"""
 "aspect_metrics":{"rho_all":0.005853,"tau_tail":0.569326,"tail_levels":18,"opt_rank":176,"gap":0.0,
 "ground_norm":0.404321},"w_rest":0.0,"rankfit_metrics":{"rho_all":-0.125499,"tau_tail":0.657654,"tail_levels":18,
 "opt_rank":40,"gap":0.000193,"ground_norm":-0.741594}},"qpu_budget":{"R0_P_opt":0.518922,"R1_P_corners":0.231067,
-"R1_runner_up":0.023843},"sa_seed_sensitivity":{"R0":[35,36,35,36,35,36,35,36,36,36],"R1":[36,36,36,36,36,36,36,36,36,
-36],"R2":[36,32,36,34,35,36,36,36,35,35],"R3":[36,36,36,36,35,35,36,36,36,36]},"omega_check_R0":[[0.041429,0.09,
-0.154359,0.725167,0.108768,0.685646],[0.041429,0.1,0.099173,0.733293,0.16309,0.695962],[0.041429,0.11,0.067208,
-0.706725,0.224191,0.672444],[0.082858,0.09,0.23948,0.635001,0.090896,0.601979],[0.082858,0.1,0.16494,0.655709,
-0.162814,0.612362],[0.082858,0.11,0.106552,0.636747,0.249892,0.592405],[0.226804,0.09,0.277445,0.502196,0.153124,
-0.403042],[0.226804,0.1,0.238214,0.51699,0.2082,0.379896],[0.226804,0.11,0.249437,0.482392,0.225984,0.326175]],
-"B":{"R1":{"omega":0.041429,"delta_f":0.1,"exact":{"P3":0.095287,"P4":0.715929,"P5":0.184548,"P_opt":0.317424,
-"P_opt_given_4":0.443374,"exp_pct_given_4":98.974401,"exp_norm_given_4":0.891142,"mode4_pct":100.0,"mode4_norm":1.0},
-"resampled":{"mean_pct":100.0,"median_pct":100.0,"min_pct":100.0,"mean_norm":1.0,"frac_selected_optimal":1.0,
-"mean_P_opt_shot":0.318222,"mean_valid_rate":0.718722,"n_no_valid":0}},"R2":{"omega":0.082858,"delta_f":0.1,
-"exact":{"P3":0.134564,"P4":0.479697,"P5":0.370689,"P_opt":0.337222,"P_opt_given_4":0.702991,
-"exp_pct_given_4":99.044213,"exp_norm_given_4":0.846934,"mode4_pct":100.0,"mode4_norm":1.0},
+"R1_runner_up":0.023843},"sa_seed_runs":{"R0":[{"mean_pct":99.978803,"mean_norm":0.995801,"frac_optimal":0.972222},
+{"mean_pct":100.0,"mean_norm":1.0,"frac_optimal":1.0},{"mean_pct":99.978803,"mean_norm":0.995801,
+"frac_optimal":0.972222},{"mean_pct":100.0,"mean_norm":1.0,"frac_optimal":1.0},{"mean_pct":99.978803,
+"mean_norm":0.995801,"frac_optimal":0.972222},{"mean_pct":100.0,"mean_norm":1.0,"frac_optimal":1.0},
+{"mean_pct":99.978803,"mean_norm":0.995801,"frac_optimal":0.972222},{"mean_pct":100.0,"mean_norm":1.0,
+"frac_optimal":1.0},{"mean_pct":100.0,"mean_norm":1.0,"frac_optimal":1.0},{"mean_pct":100.0,"mean_norm":1.0,
+"frac_optimal":1.0}],"R1":[{"mean_pct":100.0,"mean_norm":1.0,"frac_optimal":1.0},{"mean_pct":100.0,"mean_norm":1.0,
+"frac_optimal":1.0},{"mean_pct":100.0,"mean_norm":1.0,"frac_optimal":1.0},{"mean_pct":100.0,"mean_norm":1.0,
+"frac_optimal":1.0},{"mean_pct":100.0,"mean_norm":1.0,"frac_optimal":1.0},{"mean_pct":100.0,"mean_norm":1.0,
+"frac_optimal":1.0},{"mean_pct":100.0,"mean_norm":1.0,"frac_optimal":1.0},{"mean_pct":100.0,"mean_norm":1.0,
+"frac_optimal":1.0},{"mean_pct":100.0,"mean_norm":1.0,"frac_optimal":1.0},{"mean_pct":100.0,"mean_norm":1.0,
+"frac_optimal":1.0}],"R2":[{"mean_pct":100.0,"mean_norm":1.0,"frac_optimal":1.0},{"mean_pct":99.896171,
+"mean_norm":0.983372,"frac_optimal":0.888889},{"mean_pct":100.0,"mean_norm":1.0,"frac_optimal":1.0},
+{"mean_pct":99.948085,"mean_norm":0.991686,"frac_optimal":0.944444},{"mean_pct":99.974043,"mean_norm":0.995843,
+"frac_optimal":0.972222},{"mean_pct":100.0,"mean_norm":1.0,"frac_optimal":1.0},{"mean_pct":100.0,"mean_norm":1.0,
+"frac_optimal":1.0},{"mean_pct":100.0,"mean_norm":1.0,"frac_optimal":1.0},{"mean_pct":99.974043,"mean_norm":0.995843,
+"frac_optimal":0.972222},{"mean_pct":99.974043,"mean_norm":0.995843,"frac_optimal":0.972222}],"R3":[{"mean_pct":100.0,
+"mean_norm":1.0,"frac_optimal":1.0},{"mean_pct":100.0,"mean_norm":1.0,"frac_optimal":1.0},{"mean_pct":100.0,
+"mean_norm":1.0,"frac_optimal":1.0},{"mean_pct":100.0,"mean_norm":1.0,"frac_optimal":1.0},{"mean_pct":99.991919,
+"mean_norm":0.99898,"frac_optimal":0.972222},{"mean_pct":99.988184,"mean_norm":0.998509,"frac_optimal":0.972222},
+{"mean_pct":100.0,"mean_norm":1.0,"frac_optimal":1.0},{"mean_pct":100.0,"mean_norm":1.0,"frac_optimal":1.0},
+{"mean_pct":100.0,"mean_norm":1.0,"frac_optimal":1.0},{"mean_pct":100.0,"mean_norm":1.0,"frac_optimal":1.0}]},
+"omega_check_R0":[[0.041429,0.09,0.154359,0.725167,0.108768,0.685646],[0.041429,0.1,0.099173,0.733293,0.16309,
+0.695962],[0.041429,0.11,0.067208,0.706725,0.224191,0.672444],[0.082858,0.09,0.23948,0.635001,0.090896,0.601979],
+[0.082858,0.1,0.16494,0.655709,0.162814,0.612362],[0.082858,0.11,0.106552,0.636747,0.249892,0.592405],[0.226804,0.09,
+0.277445,0.502196,0.153124,0.403042],[0.226804,0.1,0.238214,0.51699,0.2082,0.379896],[0.226804,0.11,0.249437,0.482392,
+0.225984,0.326175]],"B":{"R1":{"omega":0.041429,"delta_f":0.1,"exact":{"P3":0.095287,"P4":0.715929,"P5":0.184548,
+"P_opt":0.317424,"P_opt_given_4":0.443374,"exp_pct_given_4":98.974401,"exp_norm_given_4":0.891142,"mode4_pct":100.0,
+"mode4_norm":1.0},"resampled":{"mean_pct":100.0,"median_pct":100.0,"min_pct":100.0,"mean_norm":1.0,
+"frac_selected_optimal":1.0,"mean_P_opt_shot":0.318222,"mean_valid_rate":0.718722,"n_no_valid":0}},
+"R2":{"omega":0.082858,"delta_f":0.1,"exact":{"P3":0.134564,"P4":0.479697,"P5":0.370689,"P_opt":0.337222,
+"P_opt_given_4":0.702991,"exp_pct_given_4":99.044213,"exp_norm_given_4":0.846934,"mode4_pct":100.0,"mode4_norm":1.0},
 "resampled":{"mean_pct":100.0,"median_pct":100.0,"min_pct":100.0,"mean_norm":1.0,"frac_selected_optimal":1.0,
 "mean_P_opt_shot":0.334056,"mean_valid_rate":0.474944,"n_no_valid":0}},"R3":{"omega":0.082858,"delta_f":0.06,
 "exact":{"P3":0.289653,"P4":0.40115,"P5":0.208683,"P_opt":0.000481,"P_opt_given_4":0.001199,
@@ -531,8 +606,8 @@ print("QUBO minima coincide with the enumerated optimum sets on all rungs")
 #
 # - **SA-swap** (the classical reference used in the comparison table): annealing restricted to exactly $m$
 #   turbines, where each move relocates one turbine to an empty site; 20,000 steps. Its 36-run counts are one draw of
-#   the random stream: over 10 further seeds per rung it is optimal in 35–36 of 36 runs on R0 and R3, 36 on R1 and
-#   32–36 on R2 (printed below), so a single 36/36 is not a guarantee.
+#   the random stream: over 11 seeds per rung (that draw and 10 more) it is optimal in 35–36 of 36 runs on R0 and R3,
+#   36 on R1 and 32–36 on R2 (printed below), so a single 36/36 is not a guarantee.
 # - **SA-QUBO** (a note only): bit-flip SA on the full QUBO, 1,000 sweeps, $\lambda_1 = 1.05 \times 576$ chosen by
 #   scan (the paper does not state $\lambda_1$). The schedule runs from $\beta_0 = \ln 2 / (\lambda_1 + 576)$ to
 #   $\beta_1 = \ln 100 / \max(\min_{W_{ij}>0} W_{ij}, 1)$. Every move between two 4-turbine layouts must pass through
@@ -604,17 +679,22 @@ assert all(k in INST[n] for n in RUNGS for k in ("W", "site_power", "optimum", "
 assert all(r["frac_m_turbines"] == 1 for r in sa_results.values())
 assert sa_results[("R0", "SA-swap")]["frac_optimal"] == 1 and sa_results[("R1", "SA-swap")]["frac_optimal"] == 1
 
-# Seed sensitivity: the counts above are one draw. SA-swap on 10 further independent seeds per rung (full mode).
-N_SA_SEEDS = 10
+# Seed sensitivity: the counts above are one draw. SA-swap on 10 further independent seeds per rung (full mode);
+# ranges below are over all 11 seeds (the main draw plus the 10 further seeds).
+SA_KEYS = ("frac_optimal", "mean_pct", "mean_norm")
 if DEMO:
-    sa_seed_counts = FULL_RESULTS["sa_seed_sensitivity"]
-    loaded("SA-swap seed sensitivity")
+    sa_seed_runs = FULL_RESULTS["sa_seed_runs"]
+    loaded("SA-swap seed check")
 else:
-    sa_seed_counts = {name: [int(round(summarise(sa_swap(d["W"], rng_for(f"sa-seed|{name}|{i}"), n_runs=SA_RUNS), d)
-                                        ["frac_optimal"] * SA_RUNS)) for i in range(N_SA_SEEDS)] for name, d in INST.items()}
-for name, c in sa_seed_counts.items():
-    print(f"{name} SA-swap over {N_SA_SEEDS} further seeds: optimal in {min(c)}-{max(c)} of {SA_RUNS} runs")
-assert {n: (min(c), max(c)) for n, c in sa_seed_counts.items()} == {"R0": (35, 36), "R1": (36, 36), "R2": (32, 36), "R3": (35, 36)}
+    sa_seed_runs = {name: [{k: v for k, v in summarise(sa_swap(d["W"], rng_for(f"sa-seed|{name}|{i}"), n_runs=SA_RUNS), d).items()
+                            if k in SA_KEYS} for i in range(N_SEEDS - 1)] for name, d in INST.items()}
+SA_SEEDS_ALL = {name: [{k: sa_results[(name, "SA-swap")][k] for k in SA_KEYS}] + sa_seed_runs[name] for name in INST}
+for name, runs in SA_SEEDS_ALL.items():
+    lo, hi = seed_range(runs, "frac_optimal")
+    print(f"{name} SA-swap over {N_SEEDS} seeds: optimal in {round(lo * SA_RUNS)}-{round(hi * SA_RUNS)} of {SA_RUNS} runs, "
+          f"mean {fmt_range(*seed_range(runs, 'mean_pct'))}% of optimum, S {fmt_range(*seed_range(runs, 'mean_norm'), '{:+.2f}')}")
+assert {n: tuple(round(v * SA_RUNS) for v in seed_range(r, "frac_optimal")) for n, r in SA_SEEDS_ALL.items()} == \
+    {"R0": (35, 36), "R1": (36, 36), "R2": (32, 36), "R3": (35, 36)}
 
 # %% [markdown]
 # ### 2.3 Published R0 baselines on the same scale
@@ -844,10 +924,21 @@ for name, d in INST.items():
           f"(S {e['mode4_norm']:+.3f}) | 36x500: mean {r['mean_pct']:6.2f}% (S {r['mean_norm']:+.3f}), selected optimal "
           f"{round(r['frac_selected_optimal'] * 36):2d}/36, P(opt shot) {r['mean_P_opt_shot']:.3f}")
 
+# Seed check for the selection rule (resampling only, same final state): 10 further resampling seeds per rung.
+SEL_KEYS = ("frac_selected_optimal", "mean_pct", "mean_norm")
+A_sel_seed_runs = {name: [{k: v for k, v in resample_selection(PROBS_A, d, rng_for(f"sel-seed|A|{name}|{i}")).items() if k in SEL_KEYS}
+                          for i in range(N_SEEDS - 1)] for name, d in INST.items()}
+A_SEL_ALL = {name: [{k: results_A[name]["resampled"][k] for k in SEL_KEYS}] + A_sel_seed_runs[name] for name in INST}
+for name, runs in A_SEL_ALL.items():
+    lo, hi = seed_range(runs, "frac_selected_optimal")
+    print(f"{name} Encoding A selection rule over {N_SEEDS} resampling seeds: optimal in {round(lo * 36)}-{round(hi * 36)}/36 runs, "
+          f"mean S {fmt_range(*seed_range(runs, 'mean_norm'), '{:+.3f}')}")
+
 # Phase 2 exit (Tier 1): on R0 the most probable 4-turbine layout is optimal, and every resampled run selects an optimal layout.
 assert results_A["R0"]["exact"]["mode4_pct"] == 100.0
 assert results_A["R0"]["resampled"]["frac_selected_optimal"] == 1.0
-print("Tier 1: R0 solved natively (emulator)")
+assert seed_range(A_SEL_ALL["R0"], "frac_selected_optimal") == (1.0, 1.0)      # ... for every one of the 11 seeds
+print("Tier 1: on R0 the emulated native encoding selects an optimal layout")
 
 # %% [markdown]
 # On R1 the rung-blind state still selects the optimal layout because the van der Waals tail favours spread-out
@@ -1264,9 +1355,11 @@ rows.sort(key=lambda r: r[0])
 print("rung encoding    P(4)   P(opt)  P(opt|4)  E[S|4]  mode-of-4 S  36x500 sel.opt  tau_b(low5%)  opt rank")
 for n, enc, res, g in rows:
     e, rs = res["exact"], res["resampled"]
+    sel = (fmt_range(*(36 * np.array(seed_range(A_SEL_ALL[n], "frac_selected_optimal"))), "{:.0f}") if enc == "A"
+           else f"{round(rs['frac_selected_optimal'] * 36)}")
     print(f" {n}  {enc:13s}{e['P4']:.3f}  {e['P_opt']:.4f}  {e['P_opt_given_4']:.4f}  {e['exp_norm_given_4']:+.3f}"
-          f"     {e['mode4_norm']:+.3f}       {round(rs['frac_selected_optimal'] * 36):2d}/36       {g['tau_tail']:+.3f}"
-          f"     {g['opt_rank']:4d}")
+          f"     {e['mode4_norm']:+.3f}       {sel:>5s}/36       {g['tau_tail']:+.3f}     {g['opt_rank']:4d}")
+print(f"selection rule: Encoding A rows give the range over {N_SEEDS} resampling seeds; other rows are one draw")
 print("* non-scalable upper-bound probe (enumerates all C(16, 4) layouts)"
       + ("; rows other than A loaded from record (full mode)" if DEMO else ""))
 
@@ -1400,26 +1493,33 @@ def bounded_metrics(q, r, d):
 
 noise_results = {}
 print("SPAM values: 2018 literature values (De Leseleuc et al.); Orion-specific values not given in the cited overview")
-print("rung  model      P(4)           P(opt)         P(opt|4)       E[S|4]           mode-4 optimal  36x500 sel.opt (mean S)")
+print("rung  model      P(4)           P(opt)         P(opt|4)       E[S|4]           mode-4 optimal  "
+      f"36x500 sel.opt (mean S), range over {N_SEEDS} resampling seeds")
 for name in ("R0", "R1"):
     d = INST[name]
     e = results_A[name]["exact"]
     noise_results[name] = {"noiseless": dict(
         P4=[e["P4"]] * 2, P_opt=[e["P_opt"]] * 2, P_opt_given_4=[e["P_opt_given_4"]] * 2,
         exp_norm_given_4=[e["exp_norm_given_4"]] * 2, mode4_optimal=e["mode4_pct"] == 100.0,
-        sel_optimal=results_A[name]["resampled"]["frac_selected_optimal"], sel_mean_norm=results_A[name]["resampled"]["mean_norm"])}
+        sel_optimal=results_A[name]["resampled"]["frac_selected_optimal"], sel_mean_norm=results_A[name]["resampled"]["mean_norm"],
+        sel_optimal_range=list(seed_range(A_SEL_ALL[name], "frac_selected_optimal")),
+        sel_mean_norm_range=list(seed_range(A_SEL_ALL[name], "mean_norm")))}
     for label, (q, r) in NOISY.items():
         b = bounded_metrics(q, r, d)
         sel = resample_selection(q / q.sum(), d, rng_for(f"sel|{label}|{name}"))
+        runs = [sel] + [resample_selection(q / q.sum(), d, rng_for(f"sel-seed|{label}|{name}|{i}")) for i in range(N_SEEDS - 1)]
         noise_results[name][label] = dict(**{k: list(v) if isinstance(v, tuple) else v for k, v in b.items()},
-                                          sel_optimal=sel["frac_selected_optimal"], sel_mean_norm=sel["mean_norm"])
+                                          sel_optimal=sel["frac_selected_optimal"], sel_mean_norm=sel["mean_norm"],
+                                          sel_optimal_range=list(seed_range(runs, "frac_selected_optimal")),
+                                          sel_mean_norm_range=list(seed_range(runs, "mean_norm")))
     if DEMO:
         noise_results[name]["SPAM"] = dict(FULL_RESULTS["noise_A"]["results"][name]["SPAM"], _loaded=True)
     for label, g in noise_results[name].items():
         iv = lambda k: f"{g[k][0]:.3f}" if np.isclose(*g[k]) else f"{g[k][0]:.3f}-{g[k][1]:.3f}"
         print(f" {name}  {label:9s}  {iv('P4'):13s}  {iv('P_opt'):13s}  {iv('P_opt_given_4'):13s}  "
               f"{g['exp_norm_given_4'][0]:+.3f}..{g['exp_norm_given_4'][1]:+.3f}   {str(g['mode4_optimal']):5s}          "
-              f"{round(g['sel_optimal'] * 36):2d}/36 ({g['sel_mean_norm']:+.3f})")
+              f"{fmt_range(*(36 * np.array(g['sel_optimal_range'])), '{:.0f}')}/36 "
+              f"(S {fmt_range(*g['sel_mean_norm_range'], '{:+.3f}')})")
     assert all(g["P_opt"][1] - g["P_opt"][0] <= R_REST + 2e-6 for g in noise_results[name].values())   # record: 6 decimals
 if DEMO:
     loaded("SPAM with missing atoms (16 single-missing-atom emulations)")
@@ -1461,6 +1561,7 @@ def collect_results():
         "instances": {n: dict(optimum=d["optimum"], n_optima=len(d["opt_idx"]), P_random=d["P_random"]) for n, d in INST.items()},
         "sa": {f"{n}|{m}": dict(v) for (n, m), v in sa_results.items()},
         "A": {n: dict(exact=v["exact"], resampled=v["resampled"]) for n, v in results_A.items()},
+        "A_sel_seed_runs": A_sel_seed_runs,
         "A_schedule": dict(omega=OMEGA_A, delta_0=DELTA_0_A, delta_f=DELTA_F_A, T=T_MAX),
         "delta_scan_R0": {str(df): {k: v for k, v in m.items() if k != "probs"} for df, m in scan.items() if not m.get("_loaded")},
         "noise_A": dict(spam=dict(eta=SPAM_ETA, p_false_pos=SPAM_EPS, p_false_neg=SPAM_EPS_P, w_none=W_NONE,
@@ -1483,7 +1584,7 @@ def collect_results():
         rec["R3_probe_selection"] = dict(aspect=ASPECT_R3, aspect_metrics=aspect_scan[ASPECT_R3], w_rest=W_REST,
                                          rankfit_metrics=rank_fits[W_REST][0])
         rec["qpu_budget"] = qpu_budget
-        rec["sa_seed_sensitivity"] = sa_seed_counts
+        rec["sa_seed_runs"] = sa_seed_runs
         rec["omega_check_R0"] = [list(row) for row in omega_check]
         rec["B"] = {n: dict(omega=v["omega"], delta_f=v["delta_f"], exact=v["exact"], resampled=v["resampled"],
                             p4_grid=[[om, df, p4] for (om, df), p4 in v["p4_grid"].items()]) for n, v in results_B.items()}
@@ -1591,8 +1692,9 @@ display(Markdown("\n".join(lines)) if Markdown else "\n".join(lines))
 vqe = [v for k, v in PUBLISHED_R0.items() if k.startswith("VQE")]
 S_of = lambda pct: float(norm_score(pct / 100 * INST["R0"]["optimum"], INST["R0"]))
 sa_pub = PUBLISHED_R0["SA, pyqubo/neal (median, read off Fig. 9)"]
-a_sel = RES["A"]["R0"]["resampled"]
-sa_ours = RES["sa"]["R0|SA-swap"]
+a_runs = [RES["A"]["R0"]["resampled"]] + RES["A_sel_seed_runs"]["R0"]       # 11 resampling seeds
+sa_runs = [RES["sa"]["R0|SA-swap"]] + RES["sa_seed_runs"]["R0"]             # 11 SA seeds
+cnt = lambda runs, k: fmt_range(*(36 * np.array(seed_range(runs, k))), "{:.0f}")
 pub = ["**R0, like for like** (one layout per run, 36 runs). Published: Hancock et al., arXiv:2312.13123 (table and "
        "figure numbers refer to the arXiv version; journal version J. Quantum Computing 7, 55–79, 2025, "
        "doi:10.32604/jqc.2025.068127); reported numbers, not reruns. This work: this notebook.", "",
@@ -1604,17 +1706,17 @@ pub = ["**R0, like for like** (one layout per run, 36 runs). Published: Hancock 
        f"≈{sa_pub:.1f} ± {SA_READ_ERR_PCT:.0f}% | ≈{SA_PUB_S:+.1f} ± {SA_PUB_S_ERR:.1f} | | |",
        "| Gurobi (classical) | all 36 runs (Fig. 9) | 100% | +1.00 | | |",
        f"| Rydberg A (noiseless emulator) | selection rule, mean of 36 runs of 500 shots; "
-       f"{round(a_sel['frac_selected_optimal'] * 36)}/36 optimal | | | {a_sel['mean_pct']:.2f}% | {a_sel['mean_norm']:+.2f} |",
+       f"{cnt(a_runs, 'frac_selected_optimal')}/36 optimal; range over {N_SEEDS} resampling seeds | | | "
+       f"{fmt_range(*seed_range(a_runs, 'mean_pct'))}% | {fmt_range(*seed_range(a_runs, 'mean_norm'), '{:+.2f}')} |",
        f"| SA-swap (this work, classical, fixed-count SA; not the paper's SA) | mean of 36 runs; "
-       f"{round(sa_ours['frac_optimal'] * 36)}/36 optimal ({min(RES['sa_seed_sensitivity']['R0'])}–"
-       f"{max(RES['sa_seed_sensitivity']['R0'])}/36 over 10 further seeds) | | | "
-       f"{sa_ours['mean_pct']:.2f}% | {sa_ours['mean_norm']:+.2f} |",
+       f"{cnt(sa_runs, 'frac_optimal')}/36 optimal; range over {N_SEEDS} seeds | | | "
+       f"{fmt_range(*seed_range(sa_runs, 'mean_pct'))}% | {fmt_range(*seed_range(sa_runs, 'mean_norm'), '{:+.2f}')} |",
        "", f"Rydberg A's expected S of a single post-selected shot on R0 is {RES['A']['R0']['exact']['exp_norm_given_4']:+.2f} "
        "(first table); it is an emulator-only statistic and is not compared with the published numbers.",
        ]
 display(Markdown("\n".join(pub)) if Markdown else "\n".join(pub))
-assert a_sel["frac_selected_optimal"] == 1.0 and round(a_sel["mean_norm"], 2) == 1.0     # like-for-like: 36/36, S = 1.00
-assert len(plat) == len(PLATEAU) and max(plat_S) < RES["A"]["R3"]["exact"]["exp_norm_given_4"]   # no lattice beats A on R3
+assert seed_range(a_runs, "frac_selected_optimal") == (1.0, 1.0) and round(seed_range(a_runs, "mean_norm")[0], 2) == 1.0
+assert len(plat) == len(PLATEAU) and max(plat_S) < RES["A"]["R3"]["exact"]["exp_norm_given_4"]   # no lattice scores above A on R3
 assert not any("D-Wave" in l for l in lines + pub)                                       # D-Wave is cited in prose only
 assert round(100 - 100 * RES["instances"]["R0"]["P_random"] / RES["instances"]["R0"]["optimum"]) == 5   # "about 5%" below
 
@@ -1648,7 +1750,7 @@ ax.errorbar([X_LL], [SA_PUB_S], yerr=[SA_PUB_S_ERR], fmt="s", ms=7, mfc="#fcfcfb
 ax.text(X_LL + 0.12, SA_PUB_S, "published SA median\n(read from figure, ±0.2)", color=INK2, fontsize=8, va="center")
 ax.plot([X_LL], [RES["A"]["R0"]["resampled"]["mean_norm"]], marker="D", ms=8, mfc="#fcfcfb", mec=SERIES["Rydberg A (emulator)"][0],
         mew=2, ls="none", zorder=4)
-ax.text(X_LL, 0.90, "A, selection\nrule (36/36)", color=INK2, fontsize=8, va="top", ha="center")
+ax.text(X_LL, 0.90, "A, selection rule\n(36/36, all\n11 seeds)", color=INK2, fontsize=8, va="top", ha="center")
 ax.text(X_LL, SA_PUB_S - SA_PUB_S_ERR - 0.06, "R0, one layout\nper run, 36 runs", color=MUTED,
         fontsize=8, va="top", ha="center")
 for label, ys in vals.items():
@@ -1679,10 +1781,12 @@ assert all(n in RES["B"] for n in ("R1", "R2", "R3"))
 # %% [markdown]
 # ### 4.4 Conclusions
 # - **R0 (published instance) is Rydberg-native.** Its 79 optima are the 79 independent 4-sets of the 4×4 king graph,
-#   so a blockade register solves it directly: exact P(optimal) 0.70 and the paper's selection rule picks an optimal
-#   layout in 36/36 resampled runs. This is a structural observation about the instance, not a quantum advantage.
+#   which is exactly what a blockade register encodes: in emulation, exact P(optimal) is 0.70 and the paper's selection
+#   rule picks an optimal layout in 36/36 runs for each of 11 resampling seeds. This is a structural observation about
+#   the instance, not a quantum advantage.
 # - **R1 (long wake, uniform wind):** the rung-blind Encoding A still has the optimum as its programmed ground state,
-#   because the van der Waals tails favour spread-out layouts; P(optimal) halves to 0.32. Encoding B matches A.
+#   because the van der Waals tails favour spread-out layouts; P(optimal) halves to 0.32, yet the selection rule still
+#   picks the optimum in 36/36 runs for each of 11 resampling seeds. Encoding B matches A.
 # - **R2 (short wake, prevailing west wind):** the optimum set is unchanged, so A is unaffected; B is worse through
 #   its dynamics (a gap about 5× smaller), not its ranking.
 # - **R3 (long wake, prevailing west wind): both bottlenecks bind.** Every scalable encoding (A, B and the anisotropic
@@ -1708,6 +1812,10 @@ assert min(_diag["B-rankfit"]["prog_rank"]) == 34 and max(_diag["B-rankfit"]["pr
 assert RES["R3_probes"]["rankfit"]["exact"]["exp_norm_given_4"] < 0
 assert max(RES["A"]["R3"]["exact"]["P_opt"], RES["B"]["R3"]["exact"]["P_opt"],
            *(v["exact"]["P_opt"] for v in RES["R3_probes"].values())) < 1e-3
+# Selection-rule wording in the header and conclusions: 36/36 for every one of the 11 seeds on R0-R2, never on R3.
+_sel = {n: seed_range([RES["A"][n]["resampled"]] + RES["A_sel_seed_runs"][n], "frac_selected_optimal") for n in RUNGS}
+assert _sel == {"R0": (1.0, 1.0), "R1": (1.0, 1.0), "R2": (1.0, 1.0), "R3": (0.0, 0.0)}, _sel
+assert all(RES["noise_A"]["results"][n][m]["sel_optimal_range"] == [1.0, 1.0] for n in ("R0", "R1") for m in ("readout", "SPAM"))
 print("R3 conclusion checks pass: scalable encodings misrank the optimum; the ranking-aware fit fails on dynamics")
 
 # %% [markdown]
@@ -1722,8 +1830,8 @@ print("R3 conclusion checks pass: scalable encodings misrank the optimum; the ra
 # - The SPAM check covers Encoding A on R0 and R1 only; Encoding B and R2–R3 are noiseless.
 #
 # **Size and scaling.**
-# - 4×4 grids, 16 atoms, $m = 4$. At this size exhaustive enumeration (1,820 layouts) and SA solve every rung exactly;
-#   the study measures how well the encodings match the physics, not whether a quantum solver can compete.
+# - 4×4 grids, 16 atoms, $m = 4$. At this size exhaustive enumeration (1,820 layouts) gives every optimum exactly and
+#   SA-swap finds it in 32–36 of 36 runs on every rung (over 11 seeds); the study measures how well the encodings match the physics, not whether a quantum solver can compete.
 # - The 5×5 extension was dropped: QoolQit 1.4.0's `LocalEmulator` with emu-sv cannot sample above 24 atoms, and a
 #   25-atom emulation took about 22 min (failure log, entry 8).
 # - Encodings A and B use one atom per grid site, so a 9×9 farm would need 81 atoms. By contrast, the Plymouth group's
